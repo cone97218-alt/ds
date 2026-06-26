@@ -1,0 +1,14 @@
+{
+    "display_name": "DeepSeek使用预测",
+    "loading_order": 20,
+    "requires": [],
+    "optional": [],
+    "js": "index.js",
+    "css": "style.css",
+    "author": "AI",
+    "version": "1.60.0",
+    "homePage": "",
+    "hooks": {
+        "activate": "init"
+    }
+}
