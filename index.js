@@ -62,6 +62,8 @@ var isInitDone   = false;
 var initTimestamp = 0;
 var selectedBeforeId = null;
 var selectedAfterId = null;
+var lastProcessedSignature = '';
+var lastProcessedTime = 0;
 
 // ─── Storage keys ──────────────────────────────────────────────────────────────
 var TARGET_API            = '/api/backends/chat-completions/generate';
@@ -189,10 +191,24 @@ var PANEL_HTML = `
         <div class="ds-card-val-green"><span id="ds-stat-latest-hit-rate">-</span></div>
         <div id="ds-stat-latest-hit-rate-sub" class="ds-card-sub">暂无数据</div>
       </div>
-      <div id="ds-stat-card-hit-miss-ratio" class="ds-card">
-        <div class="ds-card-title">命中 / 未命中</div>
-        <div class="ds-card-val"><span id="ds-stat-hit-miss-ratio">0 / 0</span></div>
-        <div id="ds-stat-hit-miss-ratio-sub" class="ds-card-sub">输出 0 token</div>
+      <div id="ds-stat-card-hit-miss-ratio" class="ds-card ds-card-strip">
+        <div style="display:flex; flex-direction:column; flex-shrink:0;">
+          <div class="ds-card-title" style="margin-bottom:0;">命中 / 未命中</div>
+          <div id="ds-stat-hit-miss-ratio-sub" class="ds-card-sub" style="margin-top:2px;">输出 0 token</div>
+        </div>
+        <div style="flex:1; margin:0 16px; display:flex; flex-direction:column; gap:4px; min-width:0;">
+          <div id="ds-hit-miss-bar-bg" style="background:rgba(255,255,255,0.06); border-radius:4px; height:6px; overflow:hidden; display:flex;">
+            <div id="ds-hit-miss-bar-hit" style="background:var(--SmartThemeQuoteColor); width:0%; height:100%; transition:width 0.3s;"></div>
+            <div id="ds-hit-miss-bar-miss" style="background:var(--SmartThemeUnderlineColor); width:0%; height:100%; transition:width 0.3s;"></div>
+          </div>
+          <div style="display:flex; justify-content:space-between; font-size:9px; color:var(--SmartThemeEmColor, #9ca3af);">
+            <span id="ds-hit-miss-lbl-hit">命中: 0.0%</span>
+            <span id="ds-hit-miss-lbl-miss">未命中: 0.0%</span>
+          </div>
+        </div>
+        <div style="text-align:right; flex-shrink:0;">
+          <div class="ds-card-val" style="font-size: 16px; white-space: nowrap;"><span id="ds-stat-hit-miss-ratio">0 / 0</span></div>
+        </div>
       </div>
       <div id="ds-stat-card-avg-input-tokens" class="ds-card">
         <div class="ds-card-title">单轮平均输入</div>
@@ -1065,6 +1081,20 @@ function processUsage(usage, model, isDebug, messages) {
   var miss  = usage.prompt_cache_miss_tokens || 0;
   var comp  = usage.completion_tokens        || 0;
   var total = usage.total_tokens || (hit + miss + comp);
+
+  // Deduplicate double-triggered requests
+  var msgSig = '';
+  if (messages && messages.length > 0) {
+    msgSig = messages.map(function (m) { return m.hash || ''; }).join(',');
+  }
+  var signature = msgSig + '_' + hit + '_' + miss + '_' + comp + '_' + modelName;
+  var now = Date.now();
+  if (signature === lastProcessedSignature && (now - lastProcessedTime) < 2000) {
+    console.log('[DS] Duplicate usage processing skipped for signature:', signature);
+    return;
+  }
+  lastProcessedSignature = signature;
+  lastProcessedTime = now;
 
   var lu = {
     timestamp:               Date.now(),
@@ -2108,7 +2138,7 @@ function refreshUI() {
   }
 
   // Overview stats
-  if (el('ds-total-tokens')) el('ds-total-tokens').textContent = (s.total_tokens || 0) + ' tokens';
+  if (el('ds-total-tokens')) el('ds-total-tokens').textContent = formatTokens(s.total_tokens || 0);
   if (el('ds-total-cost'))   el('ds-total-cost').textContent   = '¥' + (s.total_cost || 0).toFixed(4);
   if (el('ds-rounds'))       el('ds-rounds').textContent       = '基于 ' + (s.rounds || 0) + ' 轮';
 
@@ -2124,20 +2154,20 @@ function refreshUI() {
 
   // Per-round averages
   if ((s.rounds || 0) > 0) {
-    if (el('ds-avg-tokens')) el('ds-avg-tokens').textContent = Math.round((s.total_tokens || 0) / s.rounds) + ' tokens';
+    if (el('ds-avg-tokens')) el('ds-avg-tokens').textContent = formatTokens((s.total_tokens || 0) / s.rounds);
     if (el('ds-avg-cost'))   el('ds-avg-cost').textContent   = '¥' + ((s.total_cost   || 0) / s.rounds).toFixed(4);
   }
 
   // Savings estimate (cache hit tokens billed at ~2% of miss price for deepseek-v4-flash)
   var sv = (s.cache_hit_tokens || 0) * 0.98 / 1e6;
   if (el('ds-savings'))        el('ds-savings').textContent        = '¥' + sv.toFixed(4);
-  if (el('ds-savings-tokens')) el('ds-savings-tokens').textContent = (s.cache_hit_tokens || 0) + ' tokens';
+  if (el('ds-savings-tokens')) el('ds-savings-tokens').textContent = formatTokens(s.cache_hit_tokens || 0);
 
   // Input / output cost breakdown
   if (el('ds-input-cost'))    el('ds-input-cost').textContent    = '¥' + (s.input_cost    || 0).toFixed(4);
-  if (el('ds-input-tokens'))  el('ds-input-tokens').textContent  = (s.input_tokens  || 0) + ' tokens';
+  if (el('ds-input-tokens'))  el('ds-input-tokens').textContent  = formatTokens(s.input_tokens || 0);
   if (el('ds-output-cost'))   el('ds-output-cost').textContent   = '¥' + (s.output_cost   || 0).toFixed(4);
-  if (el('ds-output-tokens')) el('ds-output-tokens').textContent = (s.output_tokens || 0) + ' tokens';
+  if (el('ds-output-tokens')) el('ds-output-tokens').textContent = formatTokens(s.output_tokens || 0);
 
   // New 6 cards calculations
   var roundsCount = s.rounds || 0;
@@ -2168,13 +2198,13 @@ function refreshUI() {
   }
 
   // Set text content for new cards
-  if (el('ds-stat-total-tokens')) el('ds-stat-total-tokens').textContent = totalTokens;
-  if (el('ds-stat-total-tokens-sub')) el('ds-stat-total-tokens-sub').textContent = '单轮平均 ' + avgTotalTokens;
+  if (el('ds-stat-total-tokens')) el('ds-stat-total-tokens').textContent = formatTokens(totalTokens);
+  if (el('ds-stat-total-tokens-sub')) el('ds-stat-total-tokens-sub').textContent = '单轮平均 ' + formatTokens(avgTotalTokens);
 
-  if (el('ds-stat-hit-tokens')) el('ds-stat-hit-tokens').textContent = hitTokens;
+  if (el('ds-stat-hit-tokens')) el('ds-stat-hit-tokens').textContent = formatTokens(hitTokens);
   if (el('ds-stat-hit-tokens-sub')) el('ds-stat-hit-tokens-sub').textContent = '占输入 ' + hitRatePct + '%';
 
-  if (el('ds-stat-miss-tokens')) el('ds-stat-miss-tokens').textContent = missTokens;
+  if (el('ds-stat-miss-tokens')) el('ds-stat-miss-tokens').textContent = formatTokens(missTokens);
   if (el('ds-stat-miss-tokens-sub')) el('ds-stat-miss-tokens-sub').textContent = '占输入 ' + missRatePct + '%';
 
   if (el('ds-stat-rounds-count')) el('ds-stat-rounds-count').textContent = roundsCount;
@@ -2183,8 +2213,8 @@ function refreshUI() {
   if (el('ds-stat-max-turn-cost')) el('ds-stat-max-turn-cost').textContent = '¥' + maxCost.toFixed(4);
   if (el('ds-stat-max-turn-cost-sub')) el('ds-stat-max-turn-cost-sub').textContent = maxCostModel;
 
-  if (el('ds-stat-avg-turn-tokens')) el('ds-stat-avg-turn-tokens').textContent = avgTotalTokens;
-  if (el('ds-stat-avg-turn-tokens-sub')) el('ds-stat-avg-turn-tokens-sub').textContent = '输 ' + avgInputTokens + ' · 出 ' + avgOutputTokens;
+  if (el('ds-stat-avg-turn-tokens')) el('ds-stat-avg-turn-tokens').textContent = formatTokens(avgTotalTokens);
+  if (el('ds-stat-avg-turn-tokens-sub')) el('ds-stat-avg-turn-tokens-sub').textContent = '输 ' + formatTokens(avgInputTokens) + ' · 出 ' + formatTokens(avgOutputTokens);
 
   // Latest hit rate
   var latestHitRateVal = '-';
@@ -2198,14 +2228,14 @@ function refreshUI() {
   }
 
   // Hit / Miss ratio
-  var hitMissRatioVal = hitTokens + ' / ' + missTokens;
-  var hitMissRatioSub = '输出 ' + outputTokens + ' token';
+  var hitMissRatioVal = formatTokens(hitTokens) + ' / ' + formatTokens(missTokens);
+  var hitMissRatioSub = '输出 ' + formatTokens(outputTokens);
 
   // Average Input Tokens
   var avgHit = roundsCount > 0 ? Math.round(hitTokens / roundsCount) : 0;
   var avgMiss = roundsCount > 0 ? Math.round(missTokens / roundsCount) : 0;
   var avgInputTokensVal = avgInputTokens;
-  var avgInputTokensSub = '命中 ' + avgHit + ' · 未命中 ' + avgMiss;
+  var avgInputTokensSub = '命中 ' + formatTokens(avgHit) + ' · 未命中 ' + formatTokens(avgMiss);
 
   // Average Output Tokens
   var avgOutputTokensVal = avgOutputTokens;
@@ -2254,10 +2284,10 @@ function refreshUI() {
   var minCostSub = minCostModel;
 
   var maxTurnTokVal = maxTurnTok;
-  var maxTurnTokSub = '输 ' + maxTurnTokInput + ' · 出 ' + maxTurnTokOutput;
+  var maxTurnTokSub = '输 ' + formatTokens(maxTurnTokInput) + ' · 出 ' + formatTokens(maxTurnTokOutput);
 
   var minTurnTokVal = minTurnTok;
-  var minTurnTokSub = '输 ' + minTurnTokInput + ' · 出 ' + minTurnTokOutput;
+  var minTurnTokSub = '输 ' + formatTokens(minTurnTokInput) + ' · 出 ' + formatTokens(minTurnTokOutput);
 
   // Set text content for new cards
   if (el('ds-stat-latest-hit-rate')) el('ds-stat-latest-hit-rate').textContent = latestHitRateVal;
@@ -2266,10 +2296,23 @@ function refreshUI() {
   if (el('ds-stat-hit-miss-ratio')) el('ds-stat-hit-miss-ratio').textContent = hitMissRatioVal;
   if (el('ds-stat-hit-miss-ratio-sub')) el('ds-stat-hit-miss-ratio-sub').textContent = hitMissRatioSub;
 
-  if (el('ds-stat-avg-input-tokens')) el('ds-stat-avg-input-tokens').textContent = avgInputTokensVal;
+  // Update visual hit-miss ratio bar
+  var totalInput = hitTokens + missTokens;
+  var hitPct = totalInput > 0 ? (hitTokens / totalInput * 100) : 0;
+  var missPct = totalInput > 0 ? (missTokens / totalInput * 100) : 0;
+  var hitBarEl = el('ds-hit-miss-bar-hit');
+  var missBarEl = el('ds-hit-miss-bar-miss');
+  var hitLblEl = el('ds-hit-miss-lbl-hit');
+  var missLblEl = el('ds-hit-miss-lbl-miss');
+  if (hitBarEl) hitBarEl.style.width = hitPct.toFixed(1) + '%';
+  if (missBarEl) missBarEl.style.width = (totalInput > 0 ? (100 - hitPct) : 0).toFixed(1) + '%';
+  if (hitLblEl) hitLblEl.textContent = '命中: ' + hitPct.toFixed(1) + '%';
+  if (missLblEl) missLblEl.textContent = '未命中: ' + missPct.toFixed(1) + '%';
+
+  if (el('ds-stat-avg-input-tokens')) el('ds-stat-avg-input-tokens').textContent = formatTokens(avgInputTokensVal);
   if (el('ds-stat-avg-input-tokens-sub')) el('ds-stat-avg-input-tokens-sub').textContent = avgInputTokensSub;
 
-  if (el('ds-stat-avg-output-tokens')) el('ds-stat-avg-output-tokens').textContent = avgOutputTokensVal;
+  if (el('ds-stat-avg-output-tokens')) el('ds-stat-avg-output-tokens').textContent = formatTokens(avgOutputTokensVal);
   if (el('ds-stat-avg-output-tokens-sub')) el('ds-stat-avg-output-tokens-sub').textContent = avgOutputTokensSub;
 
   if (el('ds-stat-savings-rate')) el('ds-stat-savings-rate').textContent = savingsRateVal;
@@ -2278,10 +2321,10 @@ function refreshUI() {
   if (el('ds-stat-min-turn-cost')) el('ds-stat-min-turn-cost').textContent = minCostVal;
   if (el('ds-stat-min-turn-cost-sub')) el('ds-stat-min-turn-cost-sub').textContent = minCostSub;
 
-  if (el('ds-stat-max-turn-tokens')) el('ds-stat-max-turn-tokens').textContent = maxTurnTokVal;
+  if (el('ds-stat-max-turn-tokens')) el('ds-stat-max-turn-tokens').textContent = formatTokens(maxTurnTokVal);
   if (el('ds-stat-max-turn-tokens-sub')) el('ds-stat-max-turn-tokens-sub').textContent = maxTurnTokSub;
 
-  if (el('ds-stat-min-turn-tokens')) el('ds-stat-min-turn-tokens').textContent = minTurnTokVal;
+  if (el('ds-stat-min-turn-tokens')) el('ds-stat-min-turn-tokens').textContent = formatTokens(minTurnTokVal);
   if (el('ds-stat-min-turn-tokens-sub')) el('ds-stat-min-turn-tokens-sub').textContent = minTurnTokSub;
 
   // Balance display
@@ -2492,6 +2535,11 @@ function buildHitBar(pct) {
     '<div style="background:linear-gradient(90deg, var(--SmartThemeQuoteColor), var(--SmartThemeUnderlineColor));width:' + width +
       '%;height:100%;border-radius:4px;transition:width 0.3s"></div>' +
   '</div>';
+}
+
+function formatTokens(val) {
+  var num = parseFloat(val) || 0;
+  return (num / 10000).toFixed(1) + '万';
 }
 
 // Prevent XSS when model names are interpolated into innerHTML

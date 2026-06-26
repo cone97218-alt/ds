@@ -436,6 +436,15 @@
     padding: 14px;
 }
 
+.ds-card-strip {
+    grid-column: 1 / -1;
+    display: flex !important;
+    flex-direction: row !important;
+    justify-content: space-between !important;
+    align-items: center !important;
+    padding: 10px 14px !important;
+}
+
 .ds-card-title {
     font-size: 11px;
     color: var(--SmartThemeEmColor, #9ca3af);
@@ -537,21 +546,35 @@
 }
 
 .ds-btn-success {
-    border: 1px solid var(--SmartThemeBorderColor, #374151);
-    background: var(--SmartThemeQuoteColor, rgba(52, 211, 153, 0.2));
-    color: var(--SmartThemeBodyColor, #34d399);
+    border: 1px solid var(--SmartThemeQuoteColor) !important;
+    background: transparent !important;
+    color: var(--SmartThemeQuoteColor) !important;
+}
+.ds-btn-success:hover {
+    background: var(--SmartThemeQuoteColor) !important;
+    color: var(--SmartThemeBlurTintColor, #ffffff) !important;
 }
 
 .ds-btn-danger {
-    border: 1px solid var(--SmartThemeBorderColor, #374151);
-    background: var(--SmartThemeBotMesBlurTintColor, rgba(239, 68, 68, 0.2));
-    color: var(--SmartThemeEmColor, #fca5a5);
+    border: 1px solid var(--SmartThemeBotMesBlurTintColor) !important;
+    background: transparent !important;
+    color: var(--SmartThemeBotMesBlurTintColor) !important;
+}
+.ds-btn-danger:hover {
+    background: var(--SmartThemeBotMesBlurTintColor) !important;
+    color: var(--SmartThemeBlurTintColor, #ffffff) !important;
 }
 
 .ds-btn-danger-dark {
-    border: 1px solid var(--SmartThemeBorderColor, #374151);
-    background: var(--SmartThemeBotMesBlurTintColor, rgba(185, 28, 28, 0.3));
-    color: var(--SmartThemeEmColor, #fecaca);
+    border: 1px solid var(--SmartThemeBotMesBlurTintColor) !important;
+    background: transparent !important;
+    color: var(--SmartThemeBotMesBlurTintColor) !important;
+    opacity: 0.8;
+}
+.ds-btn-danger-dark:hover {
+    background: var(--SmartThemeBotMesBlurTintColor) !important;
+    color: var(--SmartThemeBlurTintColor, #ffffff) !important;
+    opacity: 1;
 }
 
 .ds-btn-primary {
@@ -855,23 +878,23 @@
 
 .ds-diff-summary {
     background: rgba(255, 255, 255, 0.03);
-    border: 1px solid var(--SmartThemeBorderColor, #374151);
-    border-left: 3px solid var(--SmartThemeQuoteColor, #10b981);
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-left: 3px solid var(--SmartThemeQuoteColor);
     padding: 8px 12px;
     border-radius: 6px;
-    color: var(--SmartThemeBodyColor, #f3f4f6);
+    color: var(--SmartThemeBodyColor);
 }
 .ds-diff-summary.ds-diff-kind-content_changed {
-    border-left-color: var(--SmartThemeUnderlineColor, #818cf8);
+    border-left-color: var(--SmartThemeUnderlineColor);
 }
 .ds-diff-summary.ds-diff-kind-role_changed {
-    border-left-color: var(--SmartThemeUnderlineColor, #818cf8);
+    border-left-color: var(--SmartThemeUnderlineColor);
 }
 .ds-diff-summary.ds-diff-kind-message_removed {
-    border-left-color: var(--SmartThemeBotMesBlurTintColor, #ef4444);
+    border-left-color: var(--SmartThemeBotMesBlurTintColor);
 }
 .ds-diff-summary.ds-diff-kind-message_added {
-    border-left-color: var(--SmartThemeQuoteColor, #10b981);
+    border-left-color: var(--SmartThemeQuoteColor);
 }
 
 .ds-diff-grid {
@@ -926,7 +949,7 @@
 
 .ds-diff-del {
     background: transparent !important;
-    color: var(--SmartThemeEmColor, #fca5a5) !important;
+    color: var(--SmartThemeEmColor) !important;
     text-decoration: line-through !important;
     padding: 0;
     font-weight: 500;
@@ -934,7 +957,7 @@
 
 .ds-diff-ins {
     background: transparent !important;
-    color: var(--SmartThemeQuoteColor, #34d399) !important;
+    color: var(--SmartThemeQuoteColor) !important;
     text-decoration: underline !important;
     padding: 0;
     font-weight: 700;
