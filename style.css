@@ -32,6 +32,7 @@
     border-top: 1px solid var(--SmartThemeBorderColor, #374151);
     box-sizing: border-box;
     color: var(--SmartThemeBodyColor, #f3f4f6);
+    transition: none !important;
 }
 
 /* ─── Display Modes ─── */
@@ -45,7 +46,6 @@
         transform: translate(-50%, -50%) scale(0.95) !important;
         opacity: 0 !important;
         pointer-events: none !important;
-        transition: opacity 0.2s ease, transform 0.2s ease !important;
         width: min(1200px, 75%) !important;
         height: min(1400px, calc(var(--ds-vvh, 95vh) - 24px)) !important;
         max-height: min(1400px, calc(var(--ds-vvh, 95vh) - 24px)) !important;
@@ -72,7 +72,6 @@
         transform: translateY(100%) !important;
         opacity: 0 !important;
         pointer-events: none !important;
-        transition: opacity 0.2s ease, transform 0.2s ease !important;
     }
     #ds-panel:not(.ds-qr-top):not(.ds-qr-bottom):not(.ds-qr-left):not(.ds-qr-right).ds-open {
         display: flex !important;
@@ -97,7 +96,6 @@
     transform: translateY(100%) !important;
     opacity: 0 !important;
     pointer-events: none !important;
-    transition: opacity 0.25s ease, transform 0.25s ease !important;
 }
 #ds-panel.ds-fullscreen.ds-open {
     transform: translateY(0) !important;
@@ -117,7 +115,6 @@
     transform: translate(-50%, -100%) !important;
     opacity: 0 !important;
     pointer-events: none !important;
-    transition: opacity 0.25s ease, transform 0.25s ease !important;
     width: min(1200px, 75%) !important;
     height: 70vh !important;
     max-height: 70vh !important;
@@ -153,7 +150,6 @@
     transform: translate(-50%, 100%) !important;
     opacity: 0 !important;
     pointer-events: none !important;
-    transition: opacity 0.25s ease, transform 0.25s ease !important;
     width: min(1200px, 75%) !important;
     height: 70vh !important;
     max-height: 70vh !important;
@@ -194,7 +190,6 @@
     transform: translateX(-100%) !important;
     opacity: 0 !important;
     pointer-events: none !important;
-    transition: opacity 0.25s ease, transform 0.25s ease !important;
     width: min(600px, 45%) !important;
     height: 100vh !important;
     max-height: 100vh !important;
@@ -224,7 +219,6 @@
     transform: translateX(100%) !important;
     opacity: 0 !important;
     pointer-events: none !important;
-    transition: opacity 0.25s ease, transform 0.25s ease !important;
     width: min(600px, 45%) !important;
     height: 100vh !important;
     max-height: 100vh !important;

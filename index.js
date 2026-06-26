@@ -838,7 +838,7 @@ function getWin() {
   return window.parent || window;
 }
 
-var dsQrObserver = null;
+
 
 function updateDynamicThemeColors() {
   try {
@@ -899,7 +899,6 @@ function applyDisplayMode() {
   }
 
   ensureWalletButton();
-  initQrObserver();
 }
 
 function ensureWalletButton() {
@@ -955,25 +954,7 @@ function removeWalletButton() {
   if (btn) btn.remove();
 }
 
-function initQrObserver() {
-  if (dsQrObserver) return;
-  try {
-    var doc = getDoc();
-    var win = getWin();
-    var MutationObserverClass = win.MutationObserver || win.parent?.MutationObserver || window.MutationObserver;
-    if (!MutationObserverClass) return;
 
-    dsQrObserver = new MutationObserverClass(function () {
-      var m = state.settings.displayMode || '';
-      if (m.indexOf('qr-') === 0 && (doc.querySelector('#qr--bar .qr--buttons') || doc.getElementById('qr--bar'))) {
-        ensureWalletButton();
-      }
-    });
-    dsQrObserver.observe(doc.body, { childList: true, subtree: true });
-  } catch (e) {
-    console.warn('[DS] Failed to initialize QR observer:', e);
-  }
-}
 
 // ─── Event setup ──────────────────────────────────────────────────────────────
 function setupEvents() {
