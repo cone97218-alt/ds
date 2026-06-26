@@ -65,6 +65,12 @@ var selectedAfterId = null;
 var lastProcessedSignature = '';
 var lastProcessedTime = 0;
 var walletBtnObserver = null;
+var _refreshPending = false;
+var _saveSavesTimer = null;
+var _mergedStatsCache = null;
+var _mergedStatsCacheKey = '';
+var _saveSelectHash = '';
+var _docClickListener = null;
 
 // ─── Storage keys ──────────────────────────────────────────────────────────────
 var TARGET_API            = '/api/backends/chat-completions/generate';
@@ -670,7 +676,17 @@ function loadSavedData() {
 }
 
 // ─── Persistence ──────────────────────────────────────────────────────────────
-function saveSaves()           { saveData(SAVES_STORAGE,          JSON.stringify(state.saves)); }
+function saveSaves() {
+  // Invalidate merged-stats cache whenever saves change
+  _mergedStatsCache = null;
+  _mergedStatsCacheKey = '';
+  // Debounce: coalesce rapid writes (e.g. streaming) into one localStorage write
+  if (_saveSavesTimer) clearTimeout(_saveSavesTimer);
+  _saveSavesTimer = setTimeout(function () {
+    _saveSavesTimer = null;
+    saveData(SAVES_STORAGE, JSON.stringify(state.saves));
+  }, 500);
+}
 function saveCurrentSaveKey()  { saveData(CURRENT_SAVE_KEY,       state.currentSave || ''); }
 function saveSettings()        { saveData(SETTINGS_STORAGE,       JSON.stringify(state.settings)); }
 function saveMessageCount()    { saveData(MESSAGE_COUNT_STORAGE,  String(state.messageCount)); }
@@ -762,6 +778,14 @@ function getSelectedSaveForDisplay() {
 }
 
 function getMergedStats() {
+  // Build a cheap cache key from save keys + their rounds counts
+  var cacheKey = Object.keys(state.saves).map(function (k) {
+    return k + ':' + (state.saves[k].rounds || 0);
+  }).join('|');
+  if (_mergedStatsCache && _mergedStatsCacheKey === cacheKey) {
+    return _mergedStatsCache;
+  }
+
   var m = {
     total_tokens:     0,
     total_cost:       0,
@@ -794,12 +818,17 @@ function getMergedStats() {
   m.startTime = es;
   ah.sort(function (a, b) { return b.timestamp - a.timestamp; });
   m.history = ah.slice(0, 200);
+
+  _mergedStatsCache = m;
+  _mergedStatsCacheKey = cacheKey;
   return m;
 }
 
 function deleteSave(key) {
   if (!key || key === '__all__') return;
   delete state.saves[key];
+  _mergedStatsCache = null;
+  _mergedStatsCacheKey = '';
   saveSaves();
   if (state.currentSave === key) {
     var keys = Object.keys(state.saves);
@@ -1408,19 +1437,25 @@ function saveBalanceData(data) {
 }
 
 // ─── Balance API ──────────────────────────────────────────────────────────────
-async function queryBalance() {
-  var doc = (window.parent || window).document;
-  var seEl  = doc.getElementById('ds-balance-status');
-  var beEl  = doc.getElementById('ds-balance');
-  var btn   = doc.getElementById('ds-btn-query-balance');
-
+async function fetchBalance(silent) {
   if (!state.apiKey) {
-    if (seEl) seEl.textContent = '请先输入API密钥';
+    if (!silent) {
+      var doc = getDoc();
+      var seEl = doc.getElementById('ds-balance-status');
+      if (seEl) seEl.textContent = '请先输入API密钥';
+    }
     return;
   }
 
-  if (btn) btn.textContent = '查询中...';
-  if (seEl) seEl.textContent = '正在查询...';
+  var doc = getDoc();
+  var seEl = doc.getElementById('ds-balance-status');
+  var beEl = doc.getElementById('ds-balance');
+  var btn  = doc.getElementById('ds-btn-query-balance');
+
+  if (!silent) {
+    if (btn) btn.textContent = '查询中...';
+    if (seEl) seEl.textContent = '正在查询...';
+  }
 
   try {
     var r = await fetch('https://api.deepseek.com/user/balance', {
@@ -1444,49 +1479,26 @@ async function queryBalance() {
         if (beEl) beEl.textContent = '¥' + info.total_balance + ' ' + info.currency;
         if (seEl) seEl.textContent = '账户可用 | ' + new Date().toLocaleTimeString('zh-CN');
       } else {
-        if (seEl) seEl.textContent = '自定义余额略过 | API: ¥' + info.total_balance;
+        if (!silent && seEl) seEl.textContent = '自定义余额略过 | API: ¥' + info.total_balance;
       }
     } else {
-      if (beEl) beEl.textContent = '查询失败';
-      if (seEl) seEl.textContent = d.error ? d.error.message : '请检查密钥';
-    }
-  } catch (e) {
-    if (beEl) beEl.textContent = '网络错误';
-    if (seEl) seEl.textContent = e.message;
-  }
-
-  if (btn) btn.textContent = '查询';
-}
-
-async function autoQueryBalance() {
-  if (!state.apiKey) return;
-  try {
-    var r = await fetch('https://api.deepseek.com/user/balance', {
-      method: 'GET',
-      headers: {
-        'Authorization': 'Bearer ' + state.apiKey,
-        'Content-Type':  'application/json',
-      },
-    });
-    var d = await r.json();
-    if (d.is_available && d.balance_infos && d.balance_infos.length > 0) {
-      var info = d.balance_infos[0];
-      saveBalanceData({
-        balance:   info.total_balance,
-        currency:  info.currency,
-        available: d.is_available,
-        timestamp: Date.now(),
-      });
-      if (state.customBalance === null || state.customBalance === '') {
-        var doc  = (window.parent || window).document;
-        var beEl = doc.getElementById('ds-balance');
-        var seEl = doc.getElementById('ds-balance-status');
-        if (beEl) beEl.textContent = '¥' + info.total_balance + ' ' + info.currency;
-        if (seEl) seEl.textContent = '账户可用 | ' + new Date().toLocaleTimeString('zh-CN');
+      if (!silent) {
+        if (beEl) beEl.textContent = '查询失败';
+        if (seEl) seEl.textContent = d.error ? d.error.message : '请检查密钥';
       }
     }
-  } catch (e) {}
+  } catch (e) {
+    if (!silent) {
+      if (beEl) beEl.textContent = '网络错误';
+      if (seEl) seEl.textContent = e.message;
+    }
+  }
+
+  if (!silent && btn) btn.textContent = '查询';
 }
+
+function queryBalance()     { return fetchBalance(false); }
+function autoQueryBalance() { return fetchBalance(true);  }
 
 // ─── Utility ──────────────────────────────────────────────────────────────────
 function formatStartTime(ts) {
@@ -2004,14 +2016,18 @@ function bindUIControls(doc) {
     };
   }
 
-  // Close dropdown on click outside
-  doc.addEventListener('click', function (e) {
+  // Close dropdown on click outside — track listener to avoid duplicates on re-init
+  if (_docClickListener) {
+    doc.removeEventListener('click', _docClickListener);
+  }
+  _docClickListener = function (e) {
     var drop = el('ds-settings-dropdown');
     var btn = el('ds-header-settings-btn');
     if (drop && btn && !drop.contains(e.target) && !btn.contains(e.target)) {
       drop.style.display = 'none';
     }
-  });
+  };
+  doc.addEventListener('click', _docClickListener);
 
   // Display mode change binding
   var displayModeRadios = doc.querySelectorAll('input[name="ds-display-mode"]');
@@ -2100,11 +2116,19 @@ function refreshSaveSelect() {
   var select = doc.getElementById('ds-save-select');
   if (!select) return;
 
+  // Build a lightweight hash to skip unnecessary full redraws
+  var keys = Object.keys(state.saves);
+  var newHash = state.currentSave + '|' + keys.map(function (k) {
+    return k + ':' + (state.saves[k].rounds || 0);
+  }).join(',');
+  if (newHash === _saveSelectHash) return;
+  _saveSelectHash = newHash;
+
   var html = '<option value="__all__"' +
     (state.currentSave === '__all__' ? ' selected' : '') +
     '>全部存档 (合并统计)</option>';
 
-  Object.keys(state.saves)
+  keys
     .sort(function (a, b) {
       return (state.saves[b].startTime || 0) - (state.saves[a].startTime || 0);
     })
@@ -2149,6 +2173,16 @@ function togglePanel() {
 
 // ─── UI refresh ───────────────────────────────────────────────────────────────
 function refreshUI() {
+  // Debounce: coalesce multiple synchronous calls into one rAF paint
+  if (_refreshPending) return;
+  _refreshPending = true;
+  (window.parent || window).requestAnimationFrame(function () {
+    _refreshPending = false;
+    _doRefreshUI();
+  });
+}
+
+function _doRefreshUI() {
   var doc = (window.parent || window).document;
   function el(id) { return doc.getElementById(id); }
 
@@ -2481,13 +2515,11 @@ function refreshUI() {
 }
 
 // ─── HTML builders (extracted to reduce repetition) ──────────────────────────
-function buildEntryHTML(u, hitRate, isLatest) {
-  var time = new Date(u.timestamp).toLocaleTimeString('zh-CN');
+function _buildEntryBodyHTML(u, hitRate, diffBtns) {
   var hasSnapshot = u.messages && u.messages.length > 0;
-  return '<div style="padding:12px;font-family:system-ui,-apple-system,sans-serif">' +
-    '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">' +
+  return '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">' +
       '<div style="display:flex;align-items:center;gap:8px">' +
-        '<span style="font-size:11px;color:var(--SmartThemeEmColor);font-weight:500">' + time + '</span>' +
+        diffBtns.title +
         '<span style="font-size:10px;padding:2px 7px;border-radius:4px;background:var(--SmartThemeBorderColor);color:var(--SmartThemeBodyColor);font-weight:500">' +
           escapeHTML(u.model) + '</span>' +
       '</div>' +
@@ -2495,13 +2527,13 @@ function buildEntryHTML(u, hitRate, isLatest) {
         (u.cost ? u.cost.toFixed(4) : '0.0000') + '</span>' +
     '</div>' +
     '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">' +
-      buildTokenCell('tokens',  'var(--SmartThemeEmColor)', '16px', u.total_tokens)     +
-      buildTokenCell('输入',    'var(--SmartThemeUnderlineColor)', '13px', u.prompt_tokens)    +
-      buildTokenCell('输出',    'var(--SmartThemeQuoteColor)', '13px', u.completion_tokens) +
+      buildTokenCell('tokens', 'var(--SmartThemeEmColor)',          '16px', u.total_tokens)      +
+      buildTokenCell('输入',   'var(--SmartThemeUnderlineColor)',   '13px', u.prompt_tokens)     +
+      buildTokenCell('输出',   'var(--SmartThemeQuoteColor)',       '13px', u.completion_tokens) +
     '</div>' +
     buildHitBar(hitRate) +
     '<div style="display:flex;justify-content:space-between;align-items:center">' +
-      '<span style="font-size:10px;color:var(--SmartThemeQuoteColor);font-weight:500">' + hitRate + '% 命中</span>' +
+      '<span style="font-size:10px;color:var(--SmartThemeQuoteColor);font-weight:500">' + parseFloat(hitRate).toFixed(1) + '% 命中</span>' +
       '<span style="font-size:10px;color:var(--SmartThemeEmColor)">¥' +
         (u.input_cost  ? u.input_cost.toFixed(4)  : '0.0000') + ' 输入 · ¥' +
         (u.output_cost ? u.output_cost.toFixed(4) : '0.0000') + ' 输出</span>' +
@@ -2509,42 +2541,26 @@ function buildEntryHTML(u, hitRate, isLatest) {
     (hasSnapshot ?
       '<div style="display:flex; gap:6px; margin-top:8px; justify-content: flex-end;">' +
         '<button class="ds-diff-btn ds-diff-before-btn' + (u.timestamp === selectedBeforeId ? ' active' : '') + '" data-timestamp="' + u.timestamp + '">旧</button>' +
-        '<button class="ds-diff-btn ds-diff-after-btn' + (u.timestamp === selectedAfterId ? ' active' : '') + '" data-timestamp="' + u.timestamp + '">新</button>' +
-      '</div>' : '') +
+        '<button class="ds-diff-btn ds-diff-after-btn'  + (u.timestamp === selectedAfterId  ? ' active' : '') + '" data-timestamp="' + u.timestamp + '">新</button>' +
+      '</div>' : '');
+}
+
+function buildEntryHTML(u, hitRate) {
+  var time = new Date(u.timestamp).toLocaleTimeString('zh-CN');
+  return '<div style="padding:12px;font-family:system-ui,-apple-system,sans-serif">' +
+    _buildEntryBodyHTML(u, hitRate, {
+      title: '<span style="font-size:11px;color:var(--SmartThemeEmColor);font-weight:500">' + time + '</span>'
+    }) +
   '</div>';
 }
 
 function buildHistoryEntryHTML(item, idx, totalLen, timeStr, hitRate, extraClass) {
   var roundNum = totalLen - 1 - idx;
-  var hasSnapshot = item.messages && item.messages.length > 0;
   var cls = 'ds-card' + (extraClass || '');
   return '<div class="' + cls + '" style="padding:12px;margin-bottom:8px;font-family:system-ui,-apple-system,sans-serif">' +
-    '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">' +
-      '<div style="display:flex;align-items:center;gap:8px">' +
-        '<span style="font-size:11px;color:var(--SmartThemeEmColor);font-weight:500">#' + roundNum + ' · ' + timeStr + '</span>' +
-        '<span style="font-size:10px;padding:2px 7px;border-radius:4px;background:var(--SmartThemeBorderColor);color:var(--SmartThemeBodyColor);font-weight:500">' +
-          escapeHTML(item.model) + '</span>' +
-      '</div>' +
-      '<span style="font-size:13px;color:var(--SmartThemeBodyColor);font-weight:600">¥' +
-        (item.cost ? item.cost.toFixed(4) : '0.0000') + '</span>' +
-    '</div>' +
-    '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">' +
-      buildTokenCell('tokens', 'var(--SmartThemeEmColor)', '16px', item.total_tokens)     +
-      buildTokenCell('输入',   'var(--SmartThemeUnderlineColor)', '13px', item.prompt_tokens)    +
-      buildTokenCell('输出',   'var(--SmartThemeQuoteColor)', '13px', item.completion_tokens) +
-    '</div>' +
-    buildHitBar(hitRate) +
-    '<div style="display:flex;justify-content:space-between;align-items:center">' +
-      '<span style="font-size:10px;color:var(--SmartThemeQuoteColor);font-weight:500">' + hitRate.toFixed(1) + '% 命中</span>' +
-      '<span style="font-size:10px;color:var(--SmartThemeEmColor)">¥' +
-        (item.input_cost  ? item.input_cost.toFixed(4)  : '0.0000') + ' 输入 · ¥' +
-        (item.output_cost ? item.output_cost.toFixed(4) : '0.0000') + ' 输出</span>' +
-    '</div>' +
-    (hasSnapshot ?
-      '<div style="display:flex; gap:6px; margin-top:8px; justify-content: flex-end;">' +
-        '<button class="ds-diff-btn ds-diff-before-btn' + (item.timestamp === selectedBeforeId ? ' active' : '') + '" data-timestamp="' + item.timestamp + '">旧</button>' +
-        '<button class="ds-diff-btn ds-diff-after-btn' + (item.timestamp === selectedAfterId ? ' active' : '') + '" data-timestamp="' + item.timestamp + '">新</button>' +
-      '</div>' : '') +
+    _buildEntryBodyHTML(item, hitRate, {
+      title: '<span style="font-size:11px;color:var(--SmartThemeEmColor);font-weight:500">#' + roundNum + ' · ' + timeStr + '</span>'
+    }) +
   '</div>';
 }
 
@@ -2566,7 +2582,9 @@ function buildHitBar(pct) {
 
 function formatTokens(val) {
   var num = parseFloat(val) || 0;
-  return (num / 10000).toFixed(1) + '万';
+  if (num >= 10000) return (num / 10000).toFixed(1) + '万';
+  if (num >= 1000)  return (num / 1000).toFixed(1) + 'k';
+  return String(Math.round(num));
 }
 
 // Prevent XSS when model names are interpolated into innerHTML
