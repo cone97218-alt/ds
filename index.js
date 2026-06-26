@@ -64,6 +64,7 @@ var selectedBeforeId = null;
 var selectedAfterId = null;
 var lastProcessedSignature = '';
 var lastProcessedTime = 0;
+var walletBtnObserver = null;
 
 // ─── Storage keys ──────────────────────────────────────────────────────────────
 var TARGET_API            = '/api/backends/chat-completions/generate';
@@ -925,8 +926,16 @@ function ensureWalletButton() {
   }
 
   var doc = getDoc();
+  var btnContainer = doc.querySelector('#qr--bar .qr--buttons') || doc.getElementById('qr--bar');
+  if (!btnContainer) return;
+
   var btn = doc.getElementById('ds-qr-wallet-btn');
-  if (btn) return;
+  if (btn) {
+    if (!btnContainer.contains(btn)) {
+      btnContainer.appendChild(btn);
+    }
+    return;
+  }
 
   btn = doc.createElement('div');
   btn.id = 'ds-qr-wallet-btn';
@@ -957,11 +966,7 @@ function ensureWalletButton() {
     togglePanel();
   });
 
-  // Query container in ST
-  var btnContainer = doc.querySelector('#qr--bar .qr--buttons') || doc.getElementById('qr--bar');
-  if (btnContainer) {
-    btnContainer.appendChild(btn); // Changed to appendBtn (appendChild)
-  }
+  btnContainer.appendChild(btn);
 }
 
 function removeWalletButton() {
@@ -970,7 +975,29 @@ function removeWalletButton() {
   if (btn) btn.remove();
 }
 
+function initWalletButtonObserver() {
+  try {
+    var doc = getDoc();
+    var win = getWin();
+    var MutationObserverClass = win.MutationObserver || win.parent?.MutationObserver || window.MutationObserver;
+    if (!MutationObserverClass) return;
 
+    if (walletBtnObserver) {
+      walletBtnObserver.disconnect();
+    }
+
+    walletBtnObserver = new MutationObserverClass(function () {
+      var mode = state.settings.displayMode || 'wand-modal';
+      if (mode.indexOf('qr-') === 0) {
+        ensureWalletButton();
+      }
+    });
+
+    walletBtnObserver.observe(doc.body, { childList: true, subtree: true });
+  } catch (e) {
+    console.warn('[DS] Failed to initialize Wallet Button Observer:', e);
+  }
+}
 
 // ─── Event setup ──────────────────────────────────────────────────────────────
 function setupEvents() {
@@ -2564,7 +2591,8 @@ export function init() {
   syncViewportHeight();
 
   applyDisplayMode();
-  setInterval(ensureWalletButton, 1000);
+  initWalletButtonObserver();
+  setTimeout(ensureWalletButton, 1000);
 
   // Viewport height sync
   try {
