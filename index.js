@@ -3,10 +3,31 @@ import { getContext } from '../../../extensions.js';
 
 // ─── Pricing table (CNY per 1M tokens) ────────────────────────────────────────
 var PRICING = {
+  // Legacy pricing
   'deepseek-v4-flash':  { hit: 0.02,  miss: 1,    output: 2    },
   'deepseek-v4-pro':    { hit: 0.025, miss: 3,     output: 6    },
   'deepseek-chat':      { hit: 1.0,   miss: 2.0,   output: 8.0  },
   'deepseek-reasoner':  { hit: 2.0,   miss: 4.0,   output: 16.0 },
+
+  // New peak / off-peak pricing
+  'new': {
+    'deepseek-v4-flash': {
+      offpeak: { hit: 0.02,  miss: 1.0,  output: 2.0  },
+      peak:    { hit: 0.04,  miss: 2.0,  output: 4.0  }
+    },
+    'deepseek-v4-pro': {
+      offpeak: { hit: 0.025, miss: 3.0,  output: 6.0  },
+      peak:    { hit: 0.05,  miss: 6.0,  output: 12.0 }
+    },
+    'deepseek-chat': {
+      offpeak: { hit: 1.0,   miss: 2.0,   output: 8.0  },
+      peak:    { hit: 1.0,   miss: 2.0,   output: 8.0  }
+    },
+    'deepseek-reasoner': {
+      offpeak: { hit: 2.0,   miss: 4.0,   output: 16.0 },
+      peak:    { hit: 2.0,   miss: 4.0,   output: 16.0 }
+    }
+  }
 };
 
 // Default settings — used as fallback when merging persisted settings
@@ -42,7 +63,9 @@ var DEFAULT_SETTINGS = {
     'min-turn-cost': false,
     'max-turn-tokens': false,
     'min-turn-tokens': false,
-  }
+  },
+  useNewPricing: false,
+  newPricingDate: new Date('2026-07-15T00:00:00+08:00').getTime()
 };
 
 var state = {
@@ -56,6 +79,7 @@ var state = {
   // Settings are spread from DEFAULT_SETTINGS so new keys are never missing
   settings: Object.assign({}, DEFAULT_SETTINGS),
   messageCount: 0,
+  lastRealSave: '',
 };
 
 var isInitDone   = false;
@@ -71,6 +95,7 @@ var _mergedStatsCache = null;
 var _mergedStatsCacheKey = '';
 var _saveSelectHash = '';
 var _docClickListener = null;
+var processedRequestIds = []; // Global memory cache for API deduplication
 
 // ─── Storage keys ──────────────────────────────────────────────────────────────
 var TARGET_API            = '/api/backends/chat-completions/generate';
@@ -298,42 +323,174 @@ var PANEL_HTML = `
 // SillyTavern globals not guaranteed in extension scope.  Fall back to localStorage only;
 // the retry wrappers are kept for API compatibility but now only touch localStorage.
 
-function saveToLS(key, value) {
+// ─── IndexedDB Persistent Helper ────────────────────────────────────────────────
+var DB_NAME = 'deepseek_stats_db';
+var STORE_NAME = 'settings_store';
+var DB_VERSION = 1;
+var useLocalStorageFallback = false;
+
+function getDB() {
+  if (useLocalStorageFallback) {
+    return Promise.reject(new Error('IndexedDB in fallback mode'));
+  }
+  return new Promise(function (resolve, reject) {
+    try {
+      var request = indexedDB.open(DB_NAME, DB_VERSION);
+      request.onupgradeneeded = function (e) {
+        var db = e.target.result;
+        if (!db.objectStoreNames.contains(STORE_NAME)) {
+          db.createObjectStore(STORE_NAME);
+        }
+      };
+      request.onsuccess = function (e) {
+        resolve(e.target.result);
+      };
+      request.onerror = function (e) {
+        useLocalStorageFallback = true;
+        reject(e.target.error);
+      };
+    } catch (err) {
+      useLocalStorageFallback = true;
+      reject(err);
+    }
+  });
+}
+
+function dbGet(key) {
+  if (useLocalStorageFallback) {
+    try {
+      return Promise.resolve(localStorage.getItem('ds_ext_' + key));
+    } catch (e) {
+      return Promise.resolve(null);
+    }
+  }
+  return getDB().then(function (db) {
+    return new Promise(function (resolve, reject) {
+      try {
+        var transaction = db.transaction([STORE_NAME], 'readonly');
+        var store = transaction.objectStore(STORE_NAME);
+        var request = store.get(key);
+        request.onsuccess = function (e) {
+          resolve(e.target.result);
+        };
+        request.onerror = function (e) {
+          reject(e.target.error);
+        };
+      } catch (err) {
+        reject(err);
+      }
+    });
+  }).catch(function (err) {
+    console.warn('[DS] dbGet failed, falling back to localStorage:', err);
+    useLocalStorageFallback = true;
+    try {
+      return localStorage.getItem('ds_ext_' + key);
+    } catch (e) {
+      return null;
+    }
+  });
+}
+
+function dbSet(key, value) {
+  if (useLocalStorageFallback) {
+    try {
+      localStorage.setItem('ds_ext_' + key, value);
+      return Promise.resolve();
+    } catch (e) {
+      return Promise.resolve();
+    }
+  }
+  return getDB().then(function (db) {
+    return new Promise(function (resolve, reject) {
+      try {
+        var transaction = db.transaction([STORE_NAME], 'readwrite');
+        var store = transaction.objectStore(STORE_NAME);
+        var request = store.put(value, key);
+        request.onsuccess = function () {
+          resolve();
+        };
+        request.onerror = function (e) {
+          reject(e.target.error);
+        };
+      } catch (err) {
+        reject(err);
+      }
+    });
+  }).catch(function (err) {
+    console.warn('[DS] dbSet failed, falling back to localStorage:', err);
+    useLocalStorageFallback = true;
+    try {
+      localStorage.setItem('ds_ext_' + key, value);
+    } catch (e) {}
+  });
+}
+
+async function migrateLocalStorageToIndexedDB() {
   try {
-    localStorage.setItem('ds_ext_' + key, value);
+    var migratedKey = 'ds_db_migrated';
+    var isMigrated = await dbGet(migratedKey);
+    if (isMigrated) return;
+
+    var keysToMigrate = [
+      KEY_STORAGE,
+      BALANCE_STORAGE,
+      SAVES_STORAGE,
+      CURRENT_SAVE_KEY,
+      SETTINGS_STORAGE,
+      MESSAGE_COUNT_STORAGE,
+      CUSTOM_BALANCE_STORAGE,
+      'ds_last_real_save'
+    ];
+
+    for (var i = 0; i < keysToMigrate.length; i++) {
+      var k = keysToMigrate[i];
+      var localVal = localStorage.getItem('ds_ext_' + k);
+      if (localVal !== null) {
+        await dbSet(k, localVal);
+      }
+    }
+    await dbSet(migratedKey, true);
+    console.log('[DS] LocalStorage data migrated to IndexedDB successfully.');
   } catch (e) {
-    console.warn('[DS] localStorage write failed:', e);
+    console.warn('[DS] LocalStorage migration failed:', e);
   }
 }
 
-function loadFromLS(key) {
-  try {
-    return localStorage.getItem('ds_ext_' + key);
-  } catch (e) {
-    return null;
-  }
-}
-
-// Attempt SillyTavern variable API first, fall back to localStorage
-function saveData(key, value) {
+async function saveDataAsync(key, value) {
   try {
     if (typeof getAllVariables === 'function' && typeof replaceVariables === 'function') {
       var v = getAllVariables();
       v[key] = value;
       replaceVariables(v);
     }
-  } catch (e) { /* not available in this context */ }
-  saveToLS(key, value);
+  } catch (e) {}
+  await dbSet(key, value);
 }
 
-function loadData(key) {
+async function loadDataAsync(key) {
   try {
     if (typeof getAllVariables === 'function') {
       var v = getAllVariables();
       if (v && v[key] != null) return v[key];
     }
-  } catch (e) { /* not available */ }
-  return loadFromLS(key);
+  } catch (e) {}
+  var val = await dbGet(key);
+  return val !== undefined ? val : null;
+}
+
+// Synchronous fallbacks for API compatibility
+function saveData(key, value) {
+  saveDataAsync(key, value).catch(function(e) {
+    console.warn('[DS] saveData error:', e);
+  });
+}
+
+function loadData(key) {
+  try {
+    return localStorage.getItem('ds_ext_' + key);
+  } catch (e) {
+    return null;
+  }
 }
 
 // ─── Viewport helper ───────────────────────────────────────────────────────────
@@ -599,29 +756,28 @@ function moveModule(index, direction) {
 }
 
 // ─── Data loading ──────────────────────────────────────────────────────────────
-function loadSavedData() {
+async function loadSavedData() {
   try {
-    state.apiKey = decryptKey(loadData(KEY_STORAGE)) || '';
+    state.apiKey = decryptKey(await loadDataAsync(KEY_STORAGE)) || '';
 
-    var bd = loadData(BALANCE_STORAGE);
+    var bd = await loadDataAsync(BALANCE_STORAGE);
     if (bd) {
       try { state.balance = JSON.parse(bd); } catch (e) {}
     }
 
-    var cbd = loadData(CUSTOM_BALANCE_STORAGE);
-    // Bug fix: empty string should be treated as null (no custom balance)
+    var cbd = await loadDataAsync(CUSTOM_BALANCE_STORAGE);
     if (cbd && cbd !== '') {
       state.customBalance = cbd;
     } else {
       state.customBalance = null;
     }
 
-    var sd = loadData(SAVES_STORAGE);
+    var sd = await loadDataAsync(SAVES_STORAGE);
     if (sd) {
       try { state.saves = JSON.parse(sd); } catch (e) {}
     }
 
-    var std = loadData(SETTINGS_STORAGE);
+    var std = await loadDataAsync(SETTINGS_STORAGE);
     if (std) {
       try {
         // Bug fix #5: merge persisted settings over defaults so new keys are never missing
@@ -668,8 +824,10 @@ function loadSavedData() {
       } catch (e) {}
     }
 
-    var mc = loadData(MESSAGE_COUNT_STORAGE);
+    var mc = await loadDataAsync(MESSAGE_COUNT_STORAGE);
     state.messageCount = parseInt(mc || '0', 10) || 0;
+
+    state.lastRealSave = await loadDataAsync('ds_last_real_save') || '';
   } catch (e) {
     console.error('[DS] loadSavedData error:', e);
   }
@@ -682,19 +840,20 @@ function saveSaves() {
   _mergedStatsCacheKey = '';
   // Debounce: coalesce rapid writes (e.g. streaming) into one localStorage write
   if (_saveSavesTimer) clearTimeout(_saveSavesTimer);
-  _saveSavesTimer = setTimeout(function () {
+  _saveSavesTimer = setTimeout(async function () {
     _saveSavesTimer = null;
-    saveData(SAVES_STORAGE, JSON.stringify(state.saves));
+    await saveDataAsync(SAVES_STORAGE, JSON.stringify(state.saves));
   }, 500);
 }
-function saveCurrentSaveKey()  { saveData(CURRENT_SAVE_KEY,       state.currentSave || ''); }
-function saveSettings()        { saveData(SETTINGS_STORAGE,       JSON.stringify(state.settings)); }
-function saveMessageCount()    { saveData(MESSAGE_COUNT_STORAGE,  String(state.messageCount)); }
+async function saveCurrentSaveKey()  { await saveDataAsync(CURRENT_SAVE_KEY,       state.currentSave || ''); }
+async function saveSettings()        { await saveDataAsync(SETTINGS_STORAGE,       JSON.stringify(state.settings)); }
+async function saveMessageCount()    { await saveDataAsync(MESSAGE_COUNT_STORAGE,  String(state.messageCount)); }
+async function saveLastRealSaveKey() { await saveDataAsync('ds_last_real_save',    state.lastRealSave || ''); }
 
 // ─── Save management ───────────────────────────────────────────────────────────
-function loadCurrentSave() {
+async function loadCurrentSave() {
   try {
-    var k = loadData(CURRENT_SAVE_KEY);
+    var k = await loadDataAsync(CURRENT_SAVE_KEY);
     if (k && state.saves[k]) {
       state.currentSave = k;
     } else if (Object.keys(state.saves).length > 0) {
@@ -744,8 +903,10 @@ function createNewSave() {
     history:          [],
   };
   state.currentSave = key;
+  state.lastRealSave = key;
   saveSaves();
   saveCurrentSaveKey();
+  saveLastRealSaveKey();
   return key;
 }
 
@@ -754,6 +915,9 @@ function createNewSave() {
 // writes to the real current save; __all__ is only used for display in refreshUI.
 function getRealCurrentSave() {
   if (state.currentSave === '__all__') {
+    if (state.lastRealSave && state.saves[state.lastRealSave]) {
+      return state.saves[state.lastRealSave];
+    }
     // Write to the save that was current before switching to __all__
     // Fall back to the most recent real save
     var keys = Object.keys(state.saves);
@@ -817,24 +981,77 @@ function getMergedStats() {
   });
   m.startTime = es;
   ah.sort(function (a, b) { return b.timestamp - a.timestamp; });
-  m.history = ah.slice(0, 200);
+  m.history = ah.slice(0, 1000);
 
   _mergedStatsCache = m;
   _mergedStatsCacheKey = cacheKey;
   return m;
 }
 
-function deleteSave(key) {
+async function deleteSave(key) {
   if (!key || key === '__all__') return;
   delete state.saves[key];
   _mergedStatsCache = null;
   _mergedStatsCacheKey = '';
   saveSaves();
+  
+  if (state.lastRealSave === key) {
+    state.lastRealSave = '';
+    var keys = Object.keys(state.saves);
+    if (keys.length > 0) {
+      state.lastRealSave = keys[0];
+    }
+    await saveLastRealSaveKey();
+  }
+
   if (state.currentSave === key) {
     var keys = Object.keys(state.saves);
     state.currentSave = keys.length > 0 ? keys[0] : null;
     if (!state.currentSave) createNewSave();
-    saveCurrentSaveKey();
+    await saveCurrentSaveKey();
+  }
+}
+
+async function handleChatChanged() {
+  try {
+    var cn = '';
+    try { cn = getContext().name2 || ''; } catch (e) {}
+    if (!cn) return;
+
+    var keys = Object.keys(state.saves);
+    var matchKey = null;
+    var matchTime = 0;
+    keys.forEach(function (k) {
+      var s = state.saves[k];
+      if (s && s.character === cn) {
+        if (s.startTime > matchTime) {
+          matchTime = s.startTime;
+          matchKey = k;
+        }
+      }
+    });
+
+    if (matchKey) {
+      if (state.currentSave !== '__all__') {
+        state.currentSave = matchKey;
+        await saveCurrentSaveKey();
+      }
+      state.lastRealSave = matchKey;
+      await saveLastRealSaveKey();
+      if (isInitDone) refreshUI();
+    } else {
+      var isAllMode = (state.currentSave === '__all__');
+      var newKey = createNewSave();
+      if (isAllMode) {
+        state.currentSave = '__all__';
+        await saveCurrentSaveKey();
+      }
+      state.lastRealSave = newKey;
+      await saveLastRealSaveKey();
+      if (isInitDone) refreshUI();
+    }
+  } catch (e) {
+    console.warn('[DS] handleChatChanged error:', e);
   }
 }
 
@@ -937,11 +1154,7 @@ function applyDisplayMode() {
 
   var wandBtn = doc.getElementById('ds_wand_container');
   if (wandBtn) {
-    if (mode.indexOf('qr-') === 0) {
-      wandBtn.style.setProperty('display', 'none', 'important');
-    } else {
-      wandBtn.style.setProperty('display', 'flex', 'important');
-    }
+    wandBtn.style.setProperty('display', 'flex', 'important');
   }
 
   ensureWalletButton();
@@ -1033,6 +1246,9 @@ function setupEvents() {
   eventSource.on(event_types.MESSAGE_RECEIVED, function () {
     setTimeout(refreshUI, 500);
   });
+  eventSource.on(event_types.CHAT_CHANGED, function () {
+    setTimeout(handleChatChanged, 500);
+  });
 }
 
 // ─── Fetch interception ───────────────────────────────────────────────────────
@@ -1080,7 +1296,7 @@ function patchFetch() {
         // Bug fix #2 (model override): pass the debug model explicitly and
         // DO NOT let processUsage override it from getContext().model
         setTimeout(function () {
-          processUsage(fakeUsage, state.settings.debugModel, true /*isDebug*/, capturedMessages);
+          processUsage(fakeUsage, state.settings.debugModel, true /*isDebug*/, capturedMessages, 'debug-' + Date.now());
         }, 100);
         // Still let the real request through so SillyTavern works normally
         return rawFetch.apply(p, args);
@@ -1092,14 +1308,17 @@ function patchFetch() {
           try {
             var data    = null;
             var trimmed = text.trim();
+            var resId   = '';
             if (trimmed.startsWith('{')) {
               data = JSON.parse(trimmed);
+              if (data && data.id) resId = data.id;
             } else {
               // SSE stream — take the LAST chunk that contains usage
               text.split('\n').forEach(function (line) {
                 if (line.startsWith('data: ') && line !== 'data: [DONE]') {
                   try {
                     var chunk = JSON.parse(line.substring(6));
+                    if (chunk.id) resId = chunk.id;
                     if (chunk.usage) data = chunk;
                   } catch (e) {}
                 }
@@ -1108,7 +1327,7 @@ function patchFetch() {
             if (data && data.usage) {
               // Bug fix #2: pass model from API response; processUsage will not
               // override it from getContext() when it is already valid
-              processUsage(data.usage, data.model || '', false, capturedMessages);
+              processUsage(data.usage, data.model || '', false, capturedMessages, resId);
             }
           } catch (e) {}
         }).catch(function () {});
@@ -1125,7 +1344,7 @@ function patchFetch() {
 // ─── Usage processing ─────────────────────────────────────────────────────────
 // Bug fix #1 + #2: write to the REAL current save (not the virtual merged object)
 // and respect the model passed in rather than always overriding from getContext()
-function processUsage(usage, model, isDebug, messages) {
+async function processUsage(usage, model, isDebug, messages, requestId) {
   // Resolve model name: prefer what the API returned, then context, then fallback
   var modelName = (model && model.trim()) ? model.trim() : '';
   if (!modelName && !isDebug) {
@@ -1133,24 +1352,48 @@ function processUsage(usage, model, isDebug, messages) {
   }
   if (!modelName) modelName = 'deepseek-v4-flash';
 
-  var hit   = usage.prompt_cache_hit_tokens  || 0;
-  var miss  = usage.prompt_cache_miss_tokens || 0;
+  var totalPrompt = usage.prompt_tokens || 0;
+  var hit = 0;
+  if (usage.prompt_cache_hit_tokens !== undefined) {
+    hit = usage.prompt_cache_hit_tokens || 0;
+  } else if (usage.prompt_tokens_details && usage.prompt_tokens_details.cached_tokens !== undefined) {
+    hit = usage.prompt_tokens_details.cached_tokens || 0;
+  }
+
+  var miss = 0;
+  if (usage.prompt_cache_miss_tokens !== undefined) {
+    miss = usage.prompt_cache_miss_tokens || 0;
+  } else {
+    miss = Math.max(0, totalPrompt - hit);
+  }
   var comp  = usage.completion_tokens        || 0;
   var total = usage.total_tokens || (hit + miss + comp);
 
-  // Deduplicate double-triggered requests
-  var msgSig = '';
-  if (messages && messages.length > 0) {
-    msgSig = messages.map(function (m) { return m.hash || ''; }).join(',');
+  // Deduplicate requests
+  if (requestId) {
+    if (processedRequestIds.indexOf(requestId) !== -1) {
+      console.log('[DS] Duplicate usage processing skipped for requestId:', requestId);
+      return;
+    }
+    processedRequestIds.push(requestId);
+    if (processedRequestIds.length > 100) {
+      processedRequestIds.shift();
+    }
+  } else {
+    // Fallback deduplication: check signature and 5-second time window
+    var msgSig = '';
+    if (messages && messages.length > 0) {
+      msgSig = messages.map(function (m) { return m.hash || ''; }).join(',');
+    }
+    var signature = msgSig + '_' + hit + '_' + miss + '_' + comp + '_' + modelName;
+    var now = Date.now();
+    if (signature === lastProcessedSignature && (now - lastProcessedTime) < 5000) {
+      console.log('[DS] Duplicate usage processing skipped for signature:', signature);
+      return;
+    }
+    lastProcessedSignature = signature;
+    lastProcessedTime = now;
   }
-  var signature = msgSig + '_' + hit + '_' + miss + '_' + comp + '_' + modelName;
-  var now = Date.now();
-  if (signature === lastProcessedSignature && (now - lastProcessedTime) < 2000) {
-    console.log('[DS] Duplicate usage processing skipped for signature:', signature);
-    return;
-  }
-  lastProcessedSignature = signature;
-  lastProcessedTime = now;
 
   var lu = {
     timestamp:               Date.now(),
@@ -1189,6 +1432,7 @@ function processUsage(usage, model, isDebug, messages) {
     input_cost:       lu.cost.input,
     output_cost:      lu.cost.output,
     cost:             lu.cost.total,
+    pricingType:      lu.cost.pricingType,
     cache_hit_rate:   lu.prompt_tokens > 0
                         ? (lu.prompt_cache_hit_tokens / lu.prompt_tokens * 100)
                         : 0,
@@ -1202,7 +1446,7 @@ function processUsage(usage, model, isDebug, messages) {
     }
   }
 
-  if (s.history.length > 200) s.history = s.history.slice(0, 200);
+  if (s.history.length > 1000) s.history = s.history.slice(0, 1000);
 
   saveSaves();
 
@@ -1210,19 +1454,19 @@ function processUsage(usage, model, isDebug, messages) {
   if (state.customBalance !== null && state.customBalance !== '') {
     var newCB = parseFloat(state.customBalance) - lu.cost.total;
     state.customBalance = String(newCB);
-    saveData(CUSTOM_BALANCE_STORAGE, state.customBalance);
+    await saveDataAsync(CUSTOM_BALANCE_STORAGE, state.customBalance);
   } else if (state.balance && state.balance.balance != null) {
     state.balance.balance = parseFloat(state.balance.balance) - lu.cost.total;
-    saveData(BALANCE_STORAGE, JSON.stringify(state.balance));
+    await saveDataAsync(BALANCE_STORAGE, JSON.stringify(state.balance));
   }
 
   state.messageCount++;
-  saveMessageCount();
+  await saveMessageCount();
 
   if (state.settings.autoBalance && state.apiKey &&
       state.messageCount >= state.settings.balanceInterval) {
     state.messageCount = 0;
-    saveMessageCount();
+    await saveMessageCount();
     autoQueryBalance();
   }
 
@@ -1230,12 +1474,53 @@ function processUsage(usage, model, isDebug, messages) {
 }
 
 // ─── Cost calculation ─────────────────────────────────────────────────────────
+function isPeakHour(timestamp) {
+  var d = new Date(timestamp);
+  var totalMinutes = (d.getUTCHours() * 60 + d.getUTCMinutes() + 8 * 60) % 1440;
+  return (totalMinutes >= 540 && totalMinutes < 720) || (totalMinutes >= 840 && totalMinutes < 1080);
+}
+
 function calcCost(u) {
-  var p  = PRICING[u.model] || PRICING['deepseek-v4-flash'];
+  var timestamp = u.timestamp || Date.now();
+  var model = u.model || 'deepseek-v4-flash';
+
+  var useNew = state.settings.useNewPricing;
+  if (useNew && state.settings.newPricingDate) {
+    if (timestamp < state.settings.newPricingDate) {
+      useNew = false;
+    }
+  }
+
+  // Normalize model name for pricing lookup
+  var normModel = 'deepseek-v4-flash';
+  if (typeof model === 'string') {
+    var m = model.toLowerCase();
+    if (m.indexOf('reasoner') !== -1) {
+      normModel = 'deepseek-reasoner';
+    } else if (m.indexOf('pro') !== -1) {
+      normModel = 'deepseek-v4-pro';
+    } else if (m.indexOf('chat') !== -1) {
+      normModel = 'deepseek-chat';
+    } else if (m.indexOf('flash') !== -1) {
+      normModel = 'deepseek-v4-flash';
+    }
+  }
+
+  var p;
+  var pricingType = 'legacy';
+  if (useNew) {
+    var modelPricing = PRICING.new[normModel] || PRICING.new['deepseek-v4-flash'];
+    var peak = isPeakHour(timestamp);
+    p = peak ? modelPricing.peak : modelPricing.offpeak;
+    pricingType = peak ? 'peak' : 'offpeak';
+  } else {
+    p = PRICING[normModel] || PRICING['deepseek-v4-flash'];
+  }
+
   var ih = (u.prompt_cache_hit_tokens  / 1e6) * p.hit;
   var im = (u.prompt_cache_miss_tokens / 1e6) * p.miss;
   var o  = (u.completion_tokens        / 1e6) * p.output;
-  return { input: ih + im, output: o, total: ih + im + o };
+  return { input: ih + im, output: o, total: ih + im + o, pricingType: pricingType };
 }
 
 function createTextHash(text) {
@@ -1426,14 +1711,14 @@ function decryptKey(ciphertext) {
   }
 }
 
-function saveApiKey(key) {
-  saveData(KEY_STORAGE, encryptKey(key));
+async function saveApiKey(key) {
+  await saveDataAsync(KEY_STORAGE, encryptKey(key));
   state.apiKey = key;
 }
 
-function saveBalanceData(data) {
+async function saveBalanceData(data) {
   state.balance = data;
-  saveData(BALANCE_STORAGE, JSON.stringify(data));
+  await saveDataAsync(BALANCE_STORAGE, JSON.stringify(data));
 }
 
 // ─── Balance API ──────────────────────────────────────────────────────────────
@@ -1469,7 +1754,7 @@ async function fetchBalance(silent) {
 
     if (d.is_available && d.balance_infos && d.balance_infos.length > 0) {
       var info = d.balance_infos[0];
-      saveBalanceData({
+      await saveBalanceData({
         balance:   info.total_balance,
         currency:  info.currency,
         available: d.is_available,
@@ -1654,6 +1939,29 @@ function createUI() {
         '</div>' +
       '</div>' +
     '</details>' +
+    '<details class="ds-dropdown-section">' +
+      '<summary>价格机制</summary>' +
+      '<div class="ds-dropdown-section-content">' +
+        '<div class="ds-flex-between ds-margin-b-8">' +
+          '<span class="ds-switch-label" style="font-size:12px">新价格机制 (峰谷定价)</span>' +
+          '<label class="ds-switch">' +
+            '<input type="checkbox" id="ds-use-new-pricing">' +
+            '<span class="ds-switch-slider"></span>' +
+          '</label>' +
+        '</div>' +
+        '<div id="ds-new-pricing-panel" style="display:none;margin-top:6px;">' +
+          '<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">' +
+            '<span style="font-size:11px;color:var(--SmartThemeEmColor);white-space:nowrap">生效日期</span>' +
+            '<input type="date" id="ds-new-pricing-date" class="ds-input-compact" style="flex:1;height:22px;padding:2px 4px;font-size:11px;">' +
+            '<button id="ds-btn-pricing-today" class="ds-btn ds-btn-sm ds-btn-normal" style="padding:2px 6px;">今天</button>' +
+          '</div>' +
+          '<div style="font-size:10px;color:var(--SmartThemeEmColor);line-height:1.4">' +
+            '<div>高峰：每日 9:00~12:00, 14:00~18:00 (北京时间)</div>' +
+            '<div style="margin-top:2px">生效日前的历史请求仍使用旧价格。</div>' +
+          '</div>' +
+        '</div>' +
+      '</div>' +
+    '</details>' +
     '<details class="ds-dropdown-section" open>' +
       '<summary>调试模式</summary>' +
       '<div class="ds-dropdown-section-content">' +
@@ -1786,14 +2094,14 @@ function bindUIControls(doc) {
 
   var btnDeleteSave = el('ds-btn-delete-save');
   if (btnDeleteSave) {
-    btnDeleteSave.onclick = function () {
+    btnDeleteSave.onclick = async function () {
       // Prevent deletion when viewing __all__
       if (state.currentSave === '__all__') {
         alert('请先选择具体存档后再删除');
         return;
       }
       if (confirm('确定删除当前存档？')) {
-        deleteSave(state.currentSave);
+        await deleteSave(state.currentSave);
         refreshUI();
       }
     };
@@ -1801,11 +2109,12 @@ function bindUIControls(doc) {
 
   var btnDeleteAll = el('ds-btn-delete-all');
   if (btnDeleteAll) {
-    btnDeleteAll.onclick = function () {
+    btnDeleteAll.onclick = async function () {
       if (confirm('确定清空全部存档？此操作不可恢复！')) {
         state.saves = {};
         saveSaves();
         createNewSave();
+        await saveCurrentSaveKey();
         refreshUI();
       }
     };
@@ -1844,9 +2153,9 @@ function bindUIControls(doc) {
   // ── API key ───────────────────────────────────────────────────────────────
   var btnSaveKey = el('ds-btn-save-key');
   if (btnSaveKey) {
-    btnSaveKey.onclick = function () {
+    btnSaveKey.onclick = async function () {
       var key = apiKeyInput ? apiKeyInput.value.trim() : '';
-      saveApiKey(key);
+      await saveApiKey(key);
       var statusEl = el('ds-balance-status');
       if (statusEl) statusEl.textContent = key ? '密钥已保存' : '密钥已清空';
     };
@@ -1887,14 +2196,14 @@ function bindUIControls(doc) {
   var cbStatus    = el('ds-custom-balance-status');
 
   if (btnSaveBal) {
-    btnSaveBal.onclick = function () {
+    btnSaveBal.onclick = async function () {
       var val = customBalanceInput ? customBalanceInput.value.trim() : '';
       if (val === '' || isNaN(parseFloat(val))) {
         if (cbStatus) { cbStatus.textContent = '请输入有效金额'; cbStatus.style.color = '#f87171'; }
         return;
       }
       state.customBalance = val;
-      saveData(CUSTOM_BALANCE_STORAGE, val);
+      await saveDataAsync(CUSTOM_BALANCE_STORAGE, val);
       if (cbStatus) { cbStatus.textContent = '已保存'; cbStatus.style.color = '#34d399'; }
       var beEl3 = el('ds-balance');
       var seEl3 = el('ds-balance-status');
@@ -1905,9 +2214,9 @@ function bindUIControls(doc) {
   }
 
   if (btnClearBal) {
-    btnClearBal.onclick = function () {
+    btnClearBal.onclick = async function () {
       state.customBalance = null;
-      saveData(CUSTOM_BALANCE_STORAGE, '');
+      await saveDataAsync(CUSTOM_BALANCE_STORAGE, '');
       if (customBalanceInput) customBalanceInput.value = '';
       if (cbStatus) { cbStatus.textContent = '已清除，恢复使用API余额'; cbStatus.style.color = '#9ca3af'; }
       var beEl4 = el('ds-balance');
@@ -1920,6 +2229,74 @@ function bindUIControls(doc) {
         if (seEl4) seEl4.textContent = '';
       }
       refreshUI();
+    };
+  }
+
+  // ── Pricing mechanism ──────────────────────────────────────────────────────
+  var useNewPricingChk  = el('ds-use-new-pricing');
+  var newPricingPanel   = el('ds-new-pricing-panel');
+  var newPricingDateInp = el('ds-new-pricing-date');
+  var btnPricingToday   = el('ds-btn-pricing-today');
+
+  function formatYMD(ts) {
+    try {
+      var options = { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' };
+      var formatter = new Intl.DateTimeFormat('zh-CN', options);
+      var parts = formatter.formatToParts(new Date(ts));
+      var y = '', m = '', d = '';
+      parts.forEach(function (p) {
+        if (p.type === 'year') y = p.value;
+        if (p.type === 'month') m = p.value;
+        if (p.type === 'day') d = p.value;
+      });
+      return y + '-' + m + '-' + d;
+    } catch (e) {
+      var d = new Date(ts + 8 * 3600000);
+      var y = d.getUTCFullYear();
+      var m = String(d.getUTCMonth() + 1).padStart(2, '0');
+      var date = String(d.getUTCDate()).padStart(2, '0');
+      return y + '-' + m + '-' + date;
+    }
+  }
+
+  if (useNewPricingChk) {
+    useNewPricingChk.checked = state.settings.useNewPricing || false;
+    if (newPricingPanel) {
+      newPricingPanel.style.display = (state.settings.useNewPricing) ? 'block' : 'none';
+    }
+    if (newPricingDateInp && state.settings.newPricingDate) {
+      newPricingDateInp.value = formatYMD(state.settings.newPricingDate);
+    }
+
+    useNewPricingChk.onchange = async function () {
+      state.settings.useNewPricing = this.checked;
+      if (newPricingPanel) {
+        newPricingPanel.style.display = this.checked ? 'block' : 'none';
+      }
+      await saveSettings();
+    };
+  }
+
+  if (newPricingDateInp) {
+    newPricingDateInp.onchange = async function () {
+      var val = this.value;
+      if (val) {
+        var d = new Date(val + 'T00:00:00+08:00');
+        state.settings.newPricingDate = d.getTime();
+        await saveSettings();
+      }
+    };
+  }
+
+  if (btnPricingToday) {
+    btnPricingToday.onclick = async function () {
+      var todayStr = formatYMD(Date.now());
+      if (newPricingDateInp) {
+        newPricingDateInp.value = todayStr;
+      }
+      var d = new Date(todayStr + 'T00:00:00+08:00');
+      state.settings.newPricingDate = d.getTime();
+      await saveSettings();
     };
   }
 
@@ -1978,9 +2355,13 @@ function bindUIControls(doc) {
   // ── Save selector ─────────────────────────────────────────────────────────
   var saveSelect = el('ds-save-select');
   if (saveSelect) {
-    saveSelect.onchange = function (e) {
+    saveSelect.onchange = async function (e) {
       state.currentSave = e.target.value;
-      saveCurrentSaveKey();
+      if (state.currentSave !== '__all__') {
+        state.lastRealSave = state.currentSave;
+        await saveLastRealSaveKey();
+      }
+      await saveCurrentSaveKey();
       refreshUI();
     };
   }
@@ -2035,9 +2416,9 @@ function bindUIControls(doc) {
     if (radio.value === state.settings.displayMode) {
       radio.checked = true;
     }
-    radio.onchange = function () {
+    radio.onchange = async function () {
       state.settings.displayMode = this.value;
-      saveSettings();
+      await saveSettings();
       applyDisplayMode();
     };
   });
@@ -2515,6 +2896,25 @@ function _doRefreshUI() {
 }
 
 // ─── HTML builders (extracted to reduce repetition) ──────────────────────────
+function getPricingBadge(u) {
+  var type = u.pricingType;
+  if (!type) {
+    var useNew = state.settings.useNewPricing;
+    if (useNew && state.settings.newPricingDate && u.timestamp >= state.settings.newPricingDate) {
+      type = isPeakHour(u.timestamp) ? 'peak' : 'offpeak';
+    } else {
+      type = 'legacy';
+    }
+  }
+  if (type === 'peak') {
+    return '<span style="font-size:9px;padding:1px 5px;border-radius:3px;color:var(--SmartThemeQuoteColor);border:1px solid var(--SmartThemeQuoteColor);font-weight:600;margin-left:4px;">高峰</span>';
+  }
+  if (type === 'offpeak') {
+    return '<span style="font-size:9px;padding:1px 5px;border-radius:3px;color:var(--SmartThemeQuoteColor);border:1px solid var(--SmartThemeQuoteColor);font-weight:600;margin-left:4px;">平时</span>';
+  }
+  return '';
+}
+
 function _buildEntryBodyHTML(u, hitRate, diffBtns) {
   var hasSnapshot = u.messages && u.messages.length > 0;
   return '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">' +
@@ -2522,6 +2922,7 @@ function _buildEntryBodyHTML(u, hitRate, diffBtns) {
         diffBtns.title +
         '<span style="font-size:10px;padding:2px 7px;border-radius:4px;background:var(--SmartThemeBorderColor);color:var(--SmartThemeBodyColor);font-weight:500">' +
           escapeHTML(u.model) + '</span>' +
+        getPricingBadge(u) +
       '</div>' +
       '<span style="font-size:13px;color:var(--SmartThemeBodyColor);font-weight:600">¥' +
         (u.cost ? u.cost.toFixed(4) : '0.0000') + '</span>' +
@@ -2597,9 +2998,14 @@ function escapeHTML(str) {
 }
 
 // ─── Extension entry-point ────────────────────────────────────────────────────
-export function init() {
-  loadSavedData();
-  loadCurrentSave();
+export async function init() {
+  await migrateLocalStorageToIndexedDB();
+  await loadSavedData();
+  await loadCurrentSave();
+  
+  // Align current character save on init
+  await handleChatChanged();
+
   setupEvents();
   createUI();
   patchFetch();
