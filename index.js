@@ -1154,7 +1154,11 @@ function applyDisplayMode() {
 
   var wandBtn = doc.getElementById('ds_wand_container');
   if (wandBtn) {
-    wandBtn.style.setProperty('display', 'flex', 'important');
+    if (mode === 'wand-modal' || mode === 'wand-fullscreen') {
+      wandBtn.style.setProperty('display', 'flex', 'important');
+    } else {
+      wandBtn.style.setProperty('display', 'none', 'important');
+    }
   }
 
   ensureWalletButton();
@@ -3014,6 +3018,26 @@ export async function init() {
   isInitDone      = true;
   syncViewportHeight();
 
+  // Register entry in SillyTavern Extensions menu
+  try {
+    var wp   = window.parent || window;
+    var wdoc = wp.document;
+    var menu = wdoc.getElementById('extensionsMenu');
+    if (menu && !wdoc.getElementById('ds_wand_container')) {
+      var container = wdoc.createElement('div');
+      container.id        = 'ds_wand_container';
+      container.className = 'extension_container';
+      container.innerHTML =
+        '<div id="ds_wand_entry" class="list-group-item flex-container flexGap5">' +
+          '<div class="fa-solid fa-wallet extensionsMenuExtensionButton"></div>' +
+          '钱包' +
+        '</div>';
+      menu.appendChild(container);
+      var wandBtn = wdoc.getElementById('ds_wand_entry');
+      if (wandBtn) wandBtn.addEventListener('click', togglePanel);
+    }
+  } catch (e) {}
+
   applyDisplayMode();
   initWalletButtonObserver();
   setTimeout(ensureWalletButton, 1000);
@@ -3043,26 +3067,6 @@ export async function init() {
         }
       }
     }, { passive: true });
-  } catch (e) {}
-
-  // Register entry in SillyTavern Extensions menu
-  try {
-    var wp   = window.parent || window;
-    var wdoc = wp.document;
-    var menu = wdoc.getElementById('extensionsMenu');
-    if (menu && !wdoc.getElementById('ds_wand_container')) {
-      var container = wdoc.createElement('div');
-      container.id        = 'ds_wand_container';
-      container.className = 'extension_container';
-      container.innerHTML =
-        '<div id="ds_wand_entry" class="list-group-item flex-container flexGap5">' +
-          '<div class="fa-solid fa-chart-bar extensionsMenuExtensionButton"></div>' +
-          'DeepSeek使用预测' +
-        '</div>';
-      menu.appendChild(container);
-      var wandBtn = wdoc.getElementById('ds_wand_entry');
-      if (wandBtn) wandBtn.addEventListener('click', togglePanel);
-    }
   } catch (e) {}
 }
 
