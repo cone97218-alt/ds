@@ -1,45 +1,61 @@
 import { eventSource, event_types } from '../../../../script.js';
 import { getContext } from '../../../extensions.js';
 
-// ─── Pricing table (CNY per 1M tokens) ────────────────────────────────────────
-var PRICING = {
-  // Legacy pricing
-  'deepseek-v4-flash':  { hit: 0.02,  miss: 1,    output: 2    },
-  'deepseek-v4-pro':    { hit: 0.025, miss: 3,     output: 6    },
-  'deepseek-chat':      { hit: 1.0,   miss: 2.0,   output: 8.0  },
-  'deepseek-reasoner':  { hit: 2.0,   miss: 4.0,   output: 16.0 },
+// ─── DS Default Pricing Rules (reference data for default channel) ─────────────
+var DS_DEFAULT_RULES = [
+  {
+    id: 'rule_ds_v4_flash',
+    pattern: 'deepseek-v4-flash',
+    label: 'DeepSeek V4 Flash',
+    hit: 0.02, miss: 1.0, output: 2.0,
+    isDefault: true, enabled: true,
+    offpeak: { hit: 0.02,  miss: 1.0, output: 2.0  },
+    peak:    { hit: 0.04,  miss: 2.0, output: 4.0  },
+  },
+  {
+    id: 'rule_ds_v4_pro',
+    pattern: 'deepseek-v4-pro',
+    label: 'DeepSeek V4 Pro',
+    hit: 0.025, miss: 3.0, output: 6.0,
+    isDefault: true, enabled: true,
+    offpeak: { hit: 0.025, miss: 3.0, output: 6.0  },
+    peak:    { hit: 0.05,  miss: 6.0, output: 12.0 },
+  },
+  {
+    id: 'rule_ds_chat',
+    pattern: 'deepseek-chat',
+    label: 'DeepSeek Chat',
+    hit: 1.0, miss: 2.0, output: 8.0,
+    isDefault: true, enabled: true,
+    offpeak: { hit: 1.0, miss: 2.0, output: 8.0 },
+    peak:    { hit: 1.0, miss: 2.0, output: 8.0 },
+  },
+  {
+    id: 'rule_ds_reasoner',
+    pattern: 'deepseek-reasoner',
+    label: 'DeepSeek Reasoner',
+    hit: 2.0, miss: 4.0, output: 16.0,
+    isDefault: true, enabled: true,
+    offpeak: { hit: 2.0, miss: 4.0, output: 16.0 },
+    peak:    { hit: 2.0, miss: 4.0, output: 16.0 },
+  },
+];
 
-  // New peak / off-peak pricing
-  'new': {
-    'deepseek-v4-flash': {
-      offpeak: { hit: 0.02,  miss: 1.0,  output: 2.0  },
-      peak:    { hit: 0.04,  miss: 2.0,  output: 4.0  }
-    },
-    'deepseek-v4-pro': {
-      offpeak: { hit: 0.025, miss: 3.0,  output: 6.0  },
-      peak:    { hit: 0.05,  miss: 6.0,  output: 12.0 }
-    },
-    'deepseek-chat': {
-      offpeak: { hit: 1.0,   miss: 2.0,   output: 8.0  },
-      peak:    { hit: 1.0,   miss: 2.0,   output: 8.0  }
-    },
-    'deepseek-reasoner': {
-      offpeak: { hit: 2.0,   miss: 4.0,   output: 16.0 },
-      peak:    { hit: 2.0,   miss: 4.0,   output: 16.0 }
-    }
-  }
-};
+function cloneDefaultRules() {
+  return DS_DEFAULT_RULES.map(function (r) {
+    return Object.assign({}, r,
+      { peak: Object.assign({}, r.peak), offpeak: Object.assign({}, r.offpeak) });
+  });
+}
 
-// Default settings — used as fallback when merging persisted settings
+// ─── Default Settings ──────────────────────────────────────────────────────────
 var DEFAULT_SETTINGS = {
-  autoBalance: false,
-  balanceInterval: 10,
   debug: false,
   debugHit: 10000,
   debugMiss: 5000,
   debugOutput: 2000,
   debugModel: 'deepseek-v4-flash',
-  displayMode: 'wand-modal', // 'wand-modal', 'wand-fullscreen', 'qr-bar', 'qr-top', 'qr-bottom', 'qr-left', or 'qr-right'
+  displayMode: 'wand-modal',
   moduleOrder: ['balance', 'stats', 'latest', 'history', 'diff'],
   moduleVisibility: { balance: true, stats: true, latest: true, history: true, diff: true },
   statsVisibility: {
@@ -64,40 +80,49 @@ var DEFAULT_SETTINGS = {
     'max-turn-tokens': false,
     'min-turn-tokens': false,
   },
+  channels: [],          // populated by initDefaultChannels()
+  balanceLayout: 'vertical', // 'vertical' | 'horizontal'
+  // Legacy fields kept only for migration detection:
+  autoBalance: false,
+  balanceInterval: 10,
   useNewPricing: false,
-  newPricingDate: new Date('2026-07-15T00:00:00+08:00').getTime()
+  newPricingDate: new Date('2026-07-15T00:00:00+08:00').getTime(),
 };
 
+// ─── State ────────────────────────────────────────────────────────────────────
 var state = {
   currentSave: null,
   saves: {},
   lastUsage: null,
   panelOpen: false,
+  // Legacy (kept for migration only):
   apiKey: '',
   balance: null,
   customBalance: null,
-  // Settings are spread from DEFAULT_SETTINGS so new keys are never missing
+  // Settings:
   settings: Object.assign({}, DEFAULT_SETTINGS),
   messageCount: 0,
   lastRealSave: '',
+  // UI transient state (not persisted):
+  activeModelFilter: '__all__',
 };
 
-var isInitDone   = false;
+var isInitDone    = false;
 var initTimestamp = 0;
 var selectedBeforeId = null;
-var selectedAfterId = null;
+var selectedAfterId  = null;
 var lastProcessedSignature = '';
-var lastProcessedTime = 0;
-var walletBtnObserver = null;
-var _refreshPending = false;
-var _saveSavesTimer = null;
-var _mergedStatsCache = null;
+var lastProcessedTime      = 0;
+var walletBtnObserver  = null;
+var _refreshPending    = false;
+var _saveSavesTimer    = null;
+var _mergedStatsCache  = null;
 var _mergedStatsCacheKey = '';
-var _saveSelectHash = '';
-var _docClickListener = null;
-var processedRequestIds = []; // Global memory cache for API deduplication
+var _saveSelectHash    = '';
+var _docClickListener  = null;
+var processedRequestIds = [];
 
-// ─── Storage keys ──────────────────────────────────────────────────────────────
+// ─── Storage keys ─────────────────────────────────────────────────────────────
 var TARGET_API            = '/api/backends/chat-completions/generate';
 var KEY_STORAGE           = 'ds_api_key';
 var BALANCE_STORAGE       = 'ds_balance_data';
@@ -110,9 +135,7 @@ var CUSTOM_BALANCE_STORAGE = 'ds_custom_balance';
 // ─── Panel HTML ────────────────────────────────────────────────────────────────
 var PANEL_HTML = `
 <div class="ds-margin-b-16" style="display:flex; align-items:center; gap:6px;">
-  <select id="ds-save-select" class="ds-select" style="height:36px; padding:6px 10px; box-sizing:border-box;">
-    <option value="">加载中...</option>
-  </select>
+  <select id="ds-save-select" class="ds-select" style="height:36px; padding:6px 10px; box-sizing:border-box;"></select>
   <button id="ds-btn-new-save" class="ds-btn ds-btn-normal" style="padding:0; width:36px; height:36px; display:flex; align-items:center; justify-content:center; box-sizing:border-box; flex-shrink:0;" title="新建当前存档">
     <i class="fa-solid fa-plus" style="font-size:14px;"></i>
   </button>
@@ -134,19 +157,17 @@ var PANEL_HTML = `
         <span>账户余额</span>
       </div>
       <div class="ds-flex-row">
-        <button id="ds-btn-query-balance" class="ds-btn ds-btn-sm ds-btn-primary">查询</button>
+        <button id="ds-btn-balance-layout" class="ds-btn ds-btn-sm ds-btn-normal" title="切换布局" style="padding:4px 8px;">
+          <i class="fa-solid fa-table-cells-large" style="font-size:11px;"></i>
+        </button>
       </div>
     </div>
-    <div id="ds-balance-box" class="ds-balance-box">
-      <div id="ds-balance" class="ds-balance-val">¥0.00 CNY</div>
-      <div id="ds-balance-remaining" class="ds-balance-remaining ds-margin-t-4"></div>
-      <div id="ds-balance-status"    class="ds-balance-status ds-margin-t-4"></div>
-    </div>
+    <div id="ds-balance-cards"></div>
   </div>
 
   <!-- 统计概览模块 -->
   <div id="ds-module-stats" class="ds-margin-b-16">
-    <div class="ds-flex-between ds-margin-b-12">
+    <div class="ds-flex-between ds-margin-b-8">
       <div class="ds-section-title">
         <div class="ds-title-indicator"></div>
         <span>统计概览</span>
@@ -157,6 +178,7 @@ var PANEL_HTML = `
         <button id="ds-btn-clear"   class="ds-btn ds-btn-sm ds-btn-danger">清空</button>
       </div>
     </div>
+    <div id="ds-model-filter" class="ds-margin-b-8"></div>
     <div class="ds-grid-3">
       <div id="ds-stat-card-total-cost" class="ds-card">
         <div class="ds-card-title">总消耗</div>
@@ -230,7 +252,7 @@ var PANEL_HTML = `
         </div>
         <div style="flex:1; margin:0 16px; display:flex; flex-direction:column; gap:4px; min-width:0;">
           <div id="ds-hit-miss-bar-bg" style="background:rgba(255,255,255,0.06); border-radius:4px; height:6px; overflow:hidden; display:flex;">
-            <div id="ds-hit-miss-bar-hit" style="background:var(--SmartThemeQuoteColor); width:0%; height:100%; transition:width 0.3s;"></div>
+            <div id="ds-hit-miss-bar-hit"  style="background:var(--SmartThemeQuoteColor); width:0%; height:100%; transition:width 0.3s;"></div>
             <div id="ds-hit-miss-bar-miss" style="background:var(--SmartThemeUnderlineColor); width:0%; height:100%; transition:width 0.3s;"></div>
           </div>
           <div style="display:flex; justify-content:space-between; font-size:9px; color:var(--SmartThemeEmColor, #9ca3af);">
@@ -311,157 +333,93 @@ var PANEL_HTML = `
       </div>
     </div>
     <div id="ds-diff" class="ds-card" style="padding:12px; font-family:system-ui,-apple-system,sans-serif">
-      <div class="ds-wait-text">请在下方历史记录中选择“旧请求”和“新请求”进行对比</div>
+      <div class="ds-wait-text">请在下方历史记录中选择"旧请求"和"新请求"进行对比</div>
     </div>
   </div>
 
 </div>
 `;
 
-// ─── Persistence helpers ───────────────────────────────────────────────────────
-// Bug fix #9: The original script called getAllVariables()/replaceVariables() which are
-// SillyTavern globals not guaranteed in extension scope.  Fall back to localStorage only;
-// the retry wrappers are kept for API compatibility but now only touch localStorage.
-
-// ─── IndexedDB Persistent Helper ────────────────────────────────────────────────
-var DB_NAME = 'deepseek_stats_db';
+// ─── IndexedDB Persistent Helper ──────────────────────────────────────────────
+var DB_NAME    = 'deepseek_stats_db';
 var STORE_NAME = 'settings_store';
 var DB_VERSION = 1;
 var useLocalStorageFallback = false;
 
 function getDB() {
-  if (useLocalStorageFallback) {
-    return Promise.reject(new Error('IndexedDB in fallback mode'));
-  }
+  if (useLocalStorageFallback) return Promise.reject(new Error('IndexedDB in fallback mode'));
   return new Promise(function (resolve, reject) {
     try {
       var request = indexedDB.open(DB_NAME, DB_VERSION);
       request.onupgradeneeded = function (e) {
         var db = e.target.result;
-        if (!db.objectStoreNames.contains(STORE_NAME)) {
-          db.createObjectStore(STORE_NAME);
-        }
+        if (!db.objectStoreNames.contains(STORE_NAME)) db.createObjectStore(STORE_NAME);
       };
-      request.onsuccess = function (e) {
-        resolve(e.target.result);
-      };
-      request.onerror = function (e) {
-        useLocalStorageFallback = true;
-        reject(e.target.error);
-      };
-    } catch (err) {
-      useLocalStorageFallback = true;
-      reject(err);
-    }
+      request.onsuccess = function (e) { resolve(e.target.result); };
+      request.onerror   = function (e) { useLocalStorageFallback = true; reject(e.target.error); };
+    } catch (err) { useLocalStorageFallback = true; reject(err); }
   });
 }
 
 function dbGet(key) {
   if (useLocalStorageFallback) {
-    try {
-      return Promise.resolve(localStorage.getItem('ds_ext_' + key));
-    } catch (e) {
-      return Promise.resolve(null);
-    }
+    try { return Promise.resolve(localStorage.getItem('ds_ext_' + key)); } catch (e) { return Promise.resolve(null); }
   }
   return getDB().then(function (db) {
     return new Promise(function (resolve, reject) {
       try {
-        var transaction = db.transaction([STORE_NAME], 'readonly');
-        var store = transaction.objectStore(STORE_NAME);
-        var request = store.get(key);
-        request.onsuccess = function (e) {
-          resolve(e.target.result);
-        };
-        request.onerror = function (e) {
-          reject(e.target.error);
-        };
-      } catch (err) {
-        reject(err);
-      }
+        var tx = db.transaction([STORE_NAME], 'readonly');
+        var req = tx.objectStore(STORE_NAME).get(key);
+        req.onsuccess = function (e) { resolve(e.target.result); };
+        req.onerror   = function (e) { reject(e.target.error); };
+      } catch (err) { reject(err); }
     });
   }).catch(function (err) {
-    console.warn('[DS] dbGet failed, falling back to localStorage:', err);
+    console.warn('[DS] dbGet fallback:', err);
     useLocalStorageFallback = true;
-    try {
-      return localStorage.getItem('ds_ext_' + key);
-    } catch (e) {
-      return null;
-    }
+    try { return localStorage.getItem('ds_ext_' + key); } catch (e) { return null; }
   });
 }
 
 function dbSet(key, value) {
   if (useLocalStorageFallback) {
-    try {
-      localStorage.setItem('ds_ext_' + key, value);
-      return Promise.resolve();
-    } catch (e) {
-      return Promise.resolve();
-    }
+    try { localStorage.setItem('ds_ext_' + key, value); return Promise.resolve(); } catch (e) { return Promise.resolve(); }
   }
   return getDB().then(function (db) {
     return new Promise(function (resolve, reject) {
       try {
-        var transaction = db.transaction([STORE_NAME], 'readwrite');
-        var store = transaction.objectStore(STORE_NAME);
-        var request = store.put(value, key);
-        request.onsuccess = function () {
-          resolve();
-        };
-        request.onerror = function (e) {
-          reject(e.target.error);
-        };
-      } catch (err) {
-        reject(err);
-      }
+        var tx  = db.transaction([STORE_NAME], 'readwrite');
+        var req = tx.objectStore(STORE_NAME).put(value, key);
+        req.onsuccess = function () { resolve(); };
+        req.onerror   = function (e) { reject(e.target.error); };
+      } catch (err) { reject(err); }
     });
   }).catch(function (err) {
-    console.warn('[DS] dbSet failed, falling back to localStorage:', err);
+    console.warn('[DS] dbSet fallback:', err);
     useLocalStorageFallback = true;
-    try {
-      localStorage.setItem('ds_ext_' + key, value);
-    } catch (e) {}
+    try { localStorage.setItem('ds_ext_' + key, value); } catch (e) {}
   });
 }
 
 async function migrateLocalStorageToIndexedDB() {
   try {
     var migratedKey = 'ds_db_migrated';
-    var isMigrated = await dbGet(migratedKey);
-    if (isMigrated) return;
-
-    var keysToMigrate = [
-      KEY_STORAGE,
-      BALANCE_STORAGE,
-      SAVES_STORAGE,
-      CURRENT_SAVE_KEY,
-      SETTINGS_STORAGE,
-      MESSAGE_COUNT_STORAGE,
-      CUSTOM_BALANCE_STORAGE,
-      'ds_last_real_save'
-    ];
-
-    for (var i = 0; i < keysToMigrate.length; i++) {
-      var k = keysToMigrate[i];
-      var localVal = localStorage.getItem('ds_ext_' + k);
-      if (localVal !== null) {
-        await dbSet(k, localVal);
-      }
+    if (await dbGet(migratedKey)) return;
+    var keys = [KEY_STORAGE, BALANCE_STORAGE, SAVES_STORAGE, CURRENT_SAVE_KEY,
+                SETTINGS_STORAGE, MESSAGE_COUNT_STORAGE, CUSTOM_BALANCE_STORAGE, 'ds_last_real_save'];
+    for (var i = 0; i < keys.length; i++) {
+      var v = localStorage.getItem('ds_ext_' + keys[i]);
+      if (v !== null) await dbSet(keys[i], v);
     }
     await dbSet(migratedKey, true);
-    console.log('[DS] LocalStorage data migrated to IndexedDB successfully.');
-  } catch (e) {
-    console.warn('[DS] LocalStorage migration failed:', e);
-  }
+    console.log('[DS] LocalStorage → IndexedDB migration done.');
+  } catch (e) { console.warn('[DS] Migration failed:', e); }
 }
 
 async function saveDataAsync(key, value) {
   try {
     if (typeof getAllVariables === 'function' && typeof replaceVariables === 'function') {
-      var v = getAllVariables();
-      v[key] = value;
-      replaceVariables(v);
+      var v = getAllVariables(); v[key] = value; replaceVariables(v);
     }
   } catch (e) {}
   await dbSet(key, value);
@@ -478,20 +436,7 @@ async function loadDataAsync(key) {
   return val !== undefined ? val : null;
 }
 
-// Synchronous fallbacks for API compatibility
-function saveData(key, value) {
-  saveDataAsync(key, value).catch(function(e) {
-    console.warn('[DS] saveData error:', e);
-  });
-}
-
-function loadData(key) {
-  try {
-    return localStorage.getItem('ds_ext_' + key);
-  } catch (e) {
-    return null;
-  }
-}
+function saveData(key, value) { saveDataAsync(key, value).catch(function (e) { console.warn('[DS] saveData error:', e); }); }
 
 // ─── Viewport helper ───────────────────────────────────────────────────────────
 function syncViewportHeight() {
@@ -502,7 +447,7 @@ function syncViewportHeight() {
   } catch (e) {}
 }
 
-// ─── Module ordering helper ───────────────────────────────────────────────────
+// ─── Module ordering helpers ──────────────────────────────────────────────────
 function applyModuleOrder() {
   try {
     var doc = getDoc();
@@ -511,13 +456,9 @@ function applyModuleOrder() {
     var order = state.settings.moduleOrder || ['balance', 'stats', 'latest', 'history', 'diff'];
     order.forEach(function (key) {
       var el = doc.getElementById('ds-module-' + key);
-      if (el) {
-        container.appendChild(el);
-      }
+      if (el) container.appendChild(el);
     });
-  } catch (e) {
-    console.warn('[DS] applyModuleOrder error:', e);
-  }
+  } catch (e) { console.warn('[DS] applyModuleOrder:', e); }
 }
 
 function applyModuleVisibility() {
@@ -528,13 +469,11 @@ function applyModuleVisibility() {
     validModules.forEach(function (key) {
       var el = doc.getElementById('ds-module-' + key);
       if (el) {
-        var isVisible = visibility[key] !== false;
-        el.style.setProperty('display', isVisible ? '' : 'none', isVisible ? '' : 'important');
+        var vis = visibility[key] !== false;
+        el.style.setProperty('display', vis ? '' : 'none', vis ? '' : 'important');
       }
     });
-  } catch (e) {
-    console.warn('[DS] applyModuleVisibility error:', e);
-  }
+  } catch (e) { console.warn('[DS] applyModuleVisibility:', e); }
 }
 
 function applyStatsVisibility() {
@@ -542,21 +481,19 @@ function applyStatsVisibility() {
     var doc = getDoc();
     var visibility = state.settings.statsVisibility || {};
     var keys = [
-      'total-cost', 'hit-rate', 'avg-cost', 'savings', 'input-cost', 'output-cost',
-      'total-tokens', 'hit-tokens', 'miss-tokens', 'rounds-count', 'max-turn-cost', 'avg-turn-tokens',
-      'latest-hit-rate', 'hit-miss-ratio', 'avg-input-tokens', 'avg-output-tokens', 'savings-rate',
-      'min-turn-cost', 'max-turn-tokens', 'min-turn-tokens'
+      'total-cost','hit-rate','avg-cost','savings','input-cost','output-cost',
+      'total-tokens','hit-tokens','miss-tokens','rounds-count','max-turn-cost','avg-turn-tokens',
+      'latest-hit-rate','hit-miss-ratio','avg-input-tokens','avg-output-tokens','savings-rate',
+      'min-turn-cost','max-turn-tokens','min-turn-tokens'
     ];
     keys.forEach(function (k) {
       var el = doc.getElementById('ds-stat-card-' + k);
       if (el) {
-        var isVisible = visibility[k] !== false;
-        el.style.setProperty('display', isVisible ? '' : 'none', isVisible ? '' : 'important');
+        var vis = visibility[k] !== false;
+        el.style.setProperty('display', vis ? '' : 'none', vis ? '' : 'important');
       }
     });
-  } catch (e) {
-    console.warn('[DS] applyStatsVisibility error:', e);
-  }
+  } catch (e) { console.warn('[DS] applyStatsVisibility:', e); }
 }
 
 function renderStatsCustomizerSettings(doc) {
@@ -564,72 +501,39 @@ function renderStatsCustomizerSettings(doc) {
     var listEl = doc.getElementById('ds-stats-custom-list');
     if (!listEl) return;
     listEl.innerHTML = '';
-
     var visibility = state.settings.statsVisibility || {};
     var keys = [
-      'total-cost', 'hit-rate', 'avg-cost', 'savings', 'input-cost', 'output-cost',
-      'total-tokens', 'hit-tokens', 'miss-tokens', 'rounds-count', 'max-turn-cost', 'avg-turn-tokens',
-      'latest-hit-rate', 'hit-miss-ratio', 'avg-input-tokens', 'avg-output-tokens', 'savings-rate',
-      'min-turn-cost', 'max-turn-tokens', 'min-turn-tokens'
+      'total-cost','hit-rate','avg-cost','savings','input-cost','output-cost',
+      'total-tokens','hit-tokens','miss-tokens','rounds-count','max-turn-cost','avg-turn-tokens',
+      'latest-hit-rate','hit-miss-ratio','avg-input-tokens','avg-output-tokens','savings-rate',
+      'min-turn-cost','max-turn-tokens','min-turn-tokens'
     ];
     var names = {
-      'total-cost': '总消耗',
-      'hit-rate': '加权缓存命中率',
-      'avg-cost': '平均每轮',
-      'savings': '预计节省',
-      'input-cost': '输入费用',
-      'output-cost': '输出费用',
-      'total-tokens': '总Tokens',
-      'hit-tokens': '命中Tokens',
-      'miss-tokens': '未命中Tokens',
-      'rounds-count': '对话轮数',
-      'max-turn-cost': '单轮最大',
-      'avg-turn-tokens': '单轮平均',
-      'latest-hit-rate': '最新命中率',
-      'hit-miss-ratio': '命中 / 未命中',
-      'avg-input-tokens': '单轮平均输入',
-      'avg-output-tokens': '单轮平均输出',
-      'savings-rate': '节省比例',
-      'min-turn-cost': '单轮最小',
-      'max-turn-tokens': '单轮最大 Tokens',
-      'min-turn-tokens': '单轮最小 Tokens'
+      'total-cost':'总消耗','hit-rate':'加权缓存命中率','avg-cost':'平均每轮','savings':'预计节省',
+      'input-cost':'输入费用','output-cost':'输出费用','total-tokens':'总Tokens','hit-tokens':'命中Tokens',
+      'miss-tokens':'未命中Tokens','rounds-count':'对话轮数','max-turn-cost':'单轮最大','avg-turn-tokens':'单轮平均',
+      'latest-hit-rate':'最新命中率','hit-miss-ratio':'命中 / 未命中','avg-input-tokens':'单轮平均输入',
+      'avg-output-tokens':'单轮平均输出','savings-rate':'节省比例','min-turn-cost':'单轮最小',
+      'max-turn-tokens':'单轮最大 Tokens','min-turn-tokens':'单轮最小 Tokens'
     };
-
     keys.forEach(function (key) {
       var lbl = doc.createElement('label');
-      lbl.style.display = 'flex';
-      lbl.style.alignItems = 'center';
-      lbl.style.gap = '4px';
-      lbl.style.cursor = 'pointer';
-      lbl.style.margin = '0';
-      lbl.style.fontSize = '11px';
-      lbl.style.minWidth = '0';
-      lbl.style.padding = '2px 0';
-
+      lbl.style.cssText = 'display:flex;align-items:center;gap:4px;cursor:pointer;margin:0;font-size:11px;min-width:0;padding:2px 0;';
       var chk = doc.createElement('input');
-      chk.type = 'checkbox';
-      chk.style.margin = '0';
-      chk.style.cursor = 'pointer';
+      chk.type = 'checkbox'; chk.style.margin = '0'; chk.style.cursor = 'pointer';
       chk.checked = visibility[key] !== false;
       chk.onchange = function () {
         state.settings.statsVisibility[key] = this.checked;
-        saveSettings();
-        applyStatsVisibility();
+        saveSettings(); applyStatsVisibility();
       };
       lbl.appendChild(chk);
-
       var span = doc.createElement('span');
-      span.style.overflow = 'hidden';
-      span.style.textOverflow = 'ellipsis';
-      span.style.whiteSpace = 'nowrap';
+      span.style.cssText = 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
       span.textContent = names[key];
       lbl.appendChild(span);
-
       listEl.appendChild(lbl);
     });
-  } catch (e) {
-    console.warn('[DS] renderStatsCustomizerSettings error:', e);
-  }
+  } catch (e) { console.warn('[DS] renderStatsCustomizerSettings:', e); }
 }
 
 function renderModuleOrderSettings(doc) {
@@ -637,188 +541,92 @@ function renderModuleOrderSettings(doc) {
     var listEl = doc.getElementById('ds-module-order-list');
     if (!listEl) return;
     listEl.innerHTML = '';
-
-    var order = state.settings.moduleOrder || ['balance', 'stats', 'latest', 'history', 'diff'];
+    var order = state.settings.moduleOrder || ['balance','stats','latest','history','diff'];
     var visibility = state.settings.moduleVisibility || {};
-    var names = {
-      balance: '钱包余额',
-      stats: '统计概览',
-      latest: '最新一条',
-      history: '历史记录',
-      diff: '缓存断点'
-    };
-
+    var names = { balance:'钱包余额', stats:'统计概览', latest:'最新一条', history:'历史记录', diff:'缓存断点' };
     order.forEach(function (key, index) {
       var row = doc.createElement('div');
       row.className = 'ds-flex-between';
-      row.style.background = 'rgba(255,255,255,0.03)';
-      row.style.padding = '4px 6px';
-      row.style.borderRadius = '6px';
-      row.style.border = '1px solid var(--SmartThemeBorderColor, #374151)';
-      row.style.fontSize = '12px';
-      row.style.alignItems = 'center';
-      row.style.marginBottom = '4px';
-      row.style.gap = '6px';
-
-      // Left: checkbox + label
+      row.style.cssText = 'background:rgba(255,255,255,0.03);padding:4px 6px;border-radius:6px;border:1px solid var(--SmartThemeBorderColor,#374151);font-size:12px;align-items:center;margin-bottom:4px;gap:6px;';
       var lbl = doc.createElement('label');
-      lbl.style.display = 'flex';
-      lbl.style.alignItems = 'center';
-      lbl.style.gap = '6px';
-      lbl.style.cursor = 'pointer';
-      lbl.style.margin = '0';
-      lbl.style.flex = '1';
-      lbl.style.minWidth = '0';
-
+      lbl.style.cssText = 'display:flex;align-items:center;gap:6px;cursor:pointer;margin:0;flex:1;min-width:0;';
       var chk = doc.createElement('input');
-      chk.type = 'checkbox';
-      chk.style.margin = '0';
-      chk.style.cursor = 'pointer';
+      chk.type = 'checkbox'; chk.style.cssText = 'margin:0;cursor:pointer;';
       chk.checked = visibility[key] !== false;
-      chk.onchange = function () {
-        state.settings.moduleVisibility[key] = this.checked;
-        saveSettings();
-        applyModuleVisibility();
-      };
+      chk.onchange = function () { state.settings.moduleVisibility[key] = this.checked; saveSettings(); applyModuleVisibility(); };
       lbl.appendChild(chk);
-
       var span = doc.createElement('span');
-      span.style.overflow = 'hidden';
-      span.style.textOverflow = 'ellipsis';
-      span.style.whiteSpace = 'nowrap';
-      span.textContent = names[key];
-      lbl.appendChild(span);
-      row.appendChild(lbl);
-
-      // Right: Up/Down buttons
+      span.style.cssText = 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+      span.textContent = names[key]; lbl.appendChild(span); row.appendChild(lbl);
       var btns = doc.createElement('div');
-      btns.style.display = 'flex';
-      btns.style.gap = '3px';
-      btns.style.flexShrink = '0';
-
-      // Up button
-      var btnUp = doc.createElement('button');
-      btnUp.className = 'ds-btn ds-btn-sm ds-btn-normal';
-      btnUp.style.padding = '2px 5px';
-      btnUp.style.fontSize = '9px';
-      btnUp.style.lineHeight = '1';
-      btnUp.innerHTML = '▲';
-      btnUp.disabled = index === 0;
-      btnUp.onclick = function (e) {
-        e.preventDefault();
-        e.stopPropagation();
-        moveModule(index, -1);
-      };
-      btns.appendChild(btnUp);
-
-      // Down button
-      var btnDown = doc.createElement('button');
-      btnDown.className = 'ds-btn ds-btn-sm ds-btn-normal';
-      btnDown.style.padding = '2px 5px';
-      btnDown.style.fontSize = '9px';
-      btnDown.style.lineHeight = '1';
-      btnDown.innerHTML = '▼';
-      btnDown.disabled = index === order.length - 1;
-      btnDown.onclick = function (e) {
-        e.preventDefault();
-        e.stopPropagation();
-        moveModule(index, 1);
-      };
-      btns.appendChild(btnDown);
-
-      row.appendChild(btns);
-      listEl.appendChild(row);
+      btns.style.cssText = 'display:flex;gap:3px;flex-shrink:0;';
+      ['▲','▼'].forEach(function (sym, di) {
+        var btn = doc.createElement('button');
+        btn.className = 'ds-btn ds-btn-sm ds-btn-normal';
+        btn.style.cssText = 'padding:2px 5px;font-size:9px;line-height:1;';
+        btn.innerHTML = sym;
+        btn.disabled = di === 0 ? index === 0 : index === order.length - 1;
+        btn.onclick = function (e) { e.preventDefault(); e.stopPropagation(); moveModule(index, di === 0 ? -1 : 1); };
+        btns.appendChild(btn);
+      });
+      row.appendChild(btns); listEl.appendChild(row);
     });
-  } catch (e) {
-    console.warn('[DS] renderModuleOrderSettings error:', e);
-  }
+  } catch (e) { console.warn('[DS] renderModuleOrderSettings:', e); }
 }
 
 function moveModule(index, direction) {
   try {
-    var order = state.settings.moduleOrder || ['balance', 'stats', 'latest', 'history', 'diff'];
-    var targetIndex = index + direction;
-    if (targetIndex < 0 || targetIndex >= order.length) return;
-    
-    // Swap
-    var temp = order[index];
-    order[index] = order[targetIndex];
-    order[targetIndex] = temp;
+    var order = state.settings.moduleOrder || ['balance','stats','latest','history','diff'];
+    var ti = index + direction;
+    if (ti < 0 || ti >= order.length) return;
+    var temp = order[index]; order[index] = order[ti]; order[ti] = temp;
     state.settings.moduleOrder = order;
     saveSettings();
-
     var doc = getDoc();
     renderModuleOrderSettings(doc);
     applyModuleOrder();
-  } catch (e) {
-    console.warn('[DS] moveModule error:', e);
-  }
+  } catch (e) { console.warn('[DS] moveModule:', e); }
 }
 
-// ─── Data loading ──────────────────────────────────────────────────────────────
+// ─── Data loading + migration ──────────────────────────────────────────────────
 async function loadSavedData() {
   try {
+    // Load legacy fields for migration
     state.apiKey = decryptKey(await loadDataAsync(KEY_STORAGE)) || '';
-
     var bd = await loadDataAsync(BALANCE_STORAGE);
-    if (bd) {
-      try { state.balance = JSON.parse(bd); } catch (e) {}
-    }
-
+    if (bd) { try { state.balance = JSON.parse(bd); } catch (e) {} }
     var cbd = await loadDataAsync(CUSTOM_BALANCE_STORAGE);
-    if (cbd && cbd !== '') {
-      state.customBalance = cbd;
-    } else {
-      state.customBalance = null;
-    }
+    state.customBalance = (cbd && cbd !== '') ? cbd : null;
 
     var sd = await loadDataAsync(SAVES_STORAGE);
-    if (sd) {
-      try { state.saves = JSON.parse(sd); } catch (e) {}
-    }
+    if (sd) { try { state.saves = JSON.parse(sd); } catch (e) {} }
 
     var std = await loadDataAsync(SETTINGS_STORAGE);
     if (std) {
       try {
-        // Bug fix #5: merge persisted settings over defaults so new keys are never missing
         var persisted = JSON.parse(std);
         state.settings = Object.assign({}, DEFAULT_SETTINGS, persisted);
 
-        // Ensure moduleOrder contains all 5 modules (handles migrations)
-        var validModules = ['balance', 'stats', 'latest', 'history', 'diff'];
+        // Ensure moduleOrder
+        var validModules = ['balance','stats','latest','history','diff'];
         if (!Array.isArray(state.settings.moduleOrder)) {
-          state.settings.moduleOrder = ['balance', 'stats', 'latest', 'history', 'diff'];
+          state.settings.moduleOrder = ['balance','stats','latest','history','diff'];
         } else {
-          state.settings.moduleOrder = state.settings.moduleOrder.filter(function (m) {
-            return validModules.indexOf(m) !== -1;
-          });
-          validModules.forEach(function (m) {
-            if (state.settings.moduleOrder.indexOf(m) === -1) {
-              state.settings.moduleOrder.push(m);
-            }
-          });
+          state.settings.moduleOrder = state.settings.moduleOrder.filter(function (m) { return validModules.indexOf(m) !== -1; });
+          validModules.forEach(function (m) { if (state.settings.moduleOrder.indexOf(m) === -1) state.settings.moduleOrder.push(m); });
         }
-
-        // Ensure moduleVisibility is defined and has entries for all 5 modules
+        // Ensure moduleVisibility
         if (!state.settings.moduleVisibility) {
-          state.settings.moduleVisibility = { balance: true, stats: true, latest: true, history: true, diff: true };
+          state.settings.moduleVisibility = { balance:true, stats:true, latest:true, history:true, diff:true };
         } else {
-          validModules.forEach(function (m) {
-            if (state.settings.moduleVisibility[m] === undefined) {
-              state.settings.moduleVisibility[m] = true;
-            }
-          });
+          validModules.forEach(function (m) { if (state.settings.moduleVisibility[m] === undefined) state.settings.moduleVisibility[m] = true; });
         }
-
-        // Ensure statsVisibility is defined and has entries for all 12 cards
+        // Ensure statsVisibility
         if (!state.settings.statsVisibility) {
           state.settings.statsVisibility = Object.assign({}, DEFAULT_SETTINGS.statsVisibility);
         } else {
-          var validKeys = Object.keys(DEFAULT_SETTINGS.statsVisibility);
-          validKeys.forEach(function (k) {
-            if (state.settings.statsVisibility[k] === undefined) {
-              state.settings.statsVisibility[k] = DEFAULT_SETTINGS.statsVisibility[k];
-            }
+          Object.keys(DEFAULT_SETTINGS.statsVisibility).forEach(function (k) {
+            if (state.settings.statsVisibility[k] === undefined) state.settings.statsVisibility[k] = DEFAULT_SETTINGS.statsVisibility[k];
           });
         }
       } catch (e) {}
@@ -826,145 +634,135 @@ async function loadSavedData() {
 
     var mc = await loadDataAsync(MESSAGE_COUNT_STORAGE);
     state.messageCount = parseInt(mc || '0', 10) || 0;
-
     state.lastRealSave = await loadDataAsync('ds_last_real_save') || '';
-  } catch (e) {
-    console.error('[DS] loadSavedData error:', e);
+  } catch (e) { console.error('[DS] loadSavedData error:', e); }
+}
+
+// ─── Channel initialization & migration ───────────────────────────────────────
+function makeNewChannelId() {
+  return 'ch_' + Math.random().toString(36).slice(2, 10);
+}
+
+function makeNewRuleId() {
+  return 'rule_' + Math.random().toString(36).slice(2, 10);
+}
+
+function initDefaultChannels() {
+  var channels = state.settings.channels;
+  if (!Array.isArray(channels)) channels = [];
+
+  // Check if DS official channel already exists
+  var dsExists = channels.some(function (ch) { return ch.id === 'ch_ds_official'; });
+
+  if (!dsExists) {
+    // Migrate old single-channel data into DS official channel
+    var dsChannel = {
+      id: 'ch_ds_official',
+      name: 'DS官方',
+      color: '#6366f1',
+      isDefault: true,
+      apiKey: state.apiKey || '',
+      balanceQueryType: 'deepseek',
+      balanceQueryUrl: '',
+      balance: state.balance || null,
+      customBalance: state.customBalance || null,
+      autoBalance: state.settings.autoBalance || false,
+      balanceInterval: state.settings.balanceInterval || 10,
+      messageCount: state.messageCount || 0,
+      useNewPricing: state.settings.useNewPricing || false,
+      newPricingDate: state.settings.newPricingDate || new Date('2026-07-15T00:00:00+08:00').getTime(),
+      pricingRules: cloneDefaultRules(),
+    };
+    channels.unshift(dsChannel);
+    state.settings.channels = channels;
+    saveSettings();
+    console.log('[DS] Migrated legacy data to DS official channel.');
+    return;
   }
+
+  // Ensure default DS official channel has all required default rules
+  var dsChannel = channels.find(function (ch) { return ch.id === 'ch_ds_official'; });
+  if (dsChannel) {
+    if (!Array.isArray(dsChannel.pricingRules)) dsChannel.pricingRules = [];
+    DS_DEFAULT_RULES.forEach(function (defRule) {
+      var exists = dsChannel.pricingRules.some(function (r) { return r.id === defRule.id; });
+      if (!exists) {
+        dsChannel.pricingRules.push(Object.assign({}, defRule,
+          { peak: Object.assign({}, defRule.peak), offpeak: Object.assign({}, defRule.offpeak) }));
+      }
+    });
+  }
+
+  state.settings.channels = channels;
 }
 
 // ─── Persistence ──────────────────────────────────────────────────────────────
 function saveSaves() {
-  // Invalidate merged-stats cache whenever saves change
-  _mergedStatsCache = null;
-  _mergedStatsCacheKey = '';
-  // Debounce: coalesce rapid writes (e.g. streaming) into one localStorage write
+  _mergedStatsCache = null; _mergedStatsCacheKey = '';
   if (_saveSavesTimer) clearTimeout(_saveSavesTimer);
   _saveSavesTimer = setTimeout(async function () {
     _saveSavesTimer = null;
     await saveDataAsync(SAVES_STORAGE, JSON.stringify(state.saves));
   }, 500);
 }
-async function saveCurrentSaveKey()  { await saveDataAsync(CURRENT_SAVE_KEY,       state.currentSave || ''); }
-async function saveSettings()        { await saveDataAsync(SETTINGS_STORAGE,       JSON.stringify(state.settings)); }
-async function saveMessageCount()    { await saveDataAsync(MESSAGE_COUNT_STORAGE,  String(state.messageCount)); }
-async function saveLastRealSaveKey() { await saveDataAsync('ds_last_real_save',    state.lastRealSave || ''); }
+async function saveCurrentSaveKey()  { await saveDataAsync(CURRENT_SAVE_KEY, state.currentSave || ''); }
+async function saveSettings()        { await saveDataAsync(SETTINGS_STORAGE, JSON.stringify(state.settings)); }
+async function saveMessageCount()    { await saveDataAsync(MESSAGE_COUNT_STORAGE, String(state.messageCount)); }
+async function saveLastRealSaveKey() { await saveDataAsync('ds_last_real_save', state.lastRealSave || ''); }
 
-// ─── Save management ───────────────────────────────────────────────────────────
+// ─── Save management ──────────────────────────────────────────────────────────
 async function loadCurrentSave() {
   try {
     var k = await loadDataAsync(CURRENT_SAVE_KEY);
-    if (k && state.saves[k]) {
-      state.currentSave = k;
-    } else if (Object.keys(state.saves).length > 0) {
-      // pick the most recently created save
-      var keys  = Object.keys(state.saves);
-      var latest = keys[0];
-      var lt     = 0;
-      keys.forEach(function (key) {
-        if ((state.saves[key].startTime || 0) > lt) {
-          lt     = state.saves[key].startTime;
-          latest = key;
-        }
-      });
+    if (k && state.saves[k]) { state.currentSave = k; }
+    else if (Object.keys(state.saves).length > 0) {
+      var keys = Object.keys(state.saves), latest = keys[0], lt = 0;
+      keys.forEach(function (key) { if ((state.saves[key].startTime || 0) > lt) { lt = state.saves[key].startTime; latest = key; } });
       state.currentSave = latest;
-    } else {
-      createNewSave();
-    }
-  } catch (e) {
-    createNewSave();
-  }
+    } else { createNewSave(); }
+  } catch (e) { createNewSave(); }
 }
 
 function createNewSave() {
-  var cn = '';
-  try { cn = getContext().name2 || ''; } catch (e) {}
+  var cn = ''; try { cn = getContext().name2 || ''; } catch (e) {}
   var n   = new Date();
-  var key = n.getFullYear() +
-            String(n.getMonth()  + 1).padStart(2, '0') +
-            String(n.getDate()      ).padStart(2, '0') + '_' +
-            String(n.getHours()     ).padStart(2, '0') +
-            String(n.getMinutes()   ).padStart(2, '0') +
-            String(n.getSeconds()   ).padStart(2, '0') + '_' +
-            (cn || 'unknown');
+  var key = n.getFullYear() + String(n.getMonth() + 1).padStart(2, '0') + String(n.getDate()).padStart(2, '0') + '_' +
+            String(n.getHours()).padStart(2, '0') + String(n.getMinutes()).padStart(2, '0') + String(n.getSeconds()).padStart(2, '0') + '_' + (cn || 'unknown');
   state.saves[key] = {
-    name:             key,
-    character:        cn,
-    startTime:        n.getTime(),
-    total_tokens:     0,
-    total_cost:       0,
-    input_tokens:     0,
-    output_tokens:    0,
-    cache_hit_tokens: 0,
-    cache_miss_tokens:0,
-    input_cost:       0,
-    output_cost:      0,
-    rounds:           0,
-    history:          [],
+    name: key, character: cn, startTime: n.getTime(),
+    total_tokens: 0, total_cost: 0, input_tokens: 0, output_tokens: 0,
+    cache_hit_tokens: 0, cache_miss_tokens: 0, input_cost: 0, output_cost: 0,
+    rounds: 0, history: [],
   };
-  state.currentSave = key;
-  state.lastRealSave = key;
-  saveSaves();
-  saveCurrentSaveKey();
-  saveLastRealSaveKey();
+  state.currentSave = key; state.lastRealSave = key;
+  saveSaves(); saveCurrentSaveKey(); saveLastRealSaveKey();
   return key;
 }
 
-// Bug fix #1: getSelectedSave now returns the REAL save object (not the merged
-// virtual object) even when __all__ is the display mode.  processUsage always
-// writes to the real current save; __all__ is only used for display in refreshUI.
 function getRealCurrentSave() {
   if (state.currentSave === '__all__') {
-    if (state.lastRealSave && state.saves[state.lastRealSave]) {
-      return state.saves[state.lastRealSave];
-    }
-    // Write to the save that was current before switching to __all__
-    // Fall back to the most recent real save
+    if (state.lastRealSave && state.saves[state.lastRealSave]) return state.saves[state.lastRealSave];
     var keys = Object.keys(state.saves);
     if (keys.length === 0) return null;
-    var latest = keys[0];
-    var lt     = 0;
-    keys.forEach(function (k) {
-      if ((state.saves[k].startTime || 0) > lt) {
-        lt     = state.saves[k].startTime;
-        latest = k;
-      }
-    });
+    var latest = keys[0], lt = 0;
+    keys.forEach(function (k) { if ((state.saves[k].startTime || 0) > lt) { lt = state.saves[k].startTime; latest = k; } });
     return state.saves[latest] || null;
   }
   return state.saves[state.currentSave] || null;
 }
 
-// Used only for UI display — may return virtual merged object
 function getSelectedSaveForDisplay() {
   if (state.currentSave === '__all__') return getMergedStats();
   return state.saves[state.currentSave] || null;
 }
 
 function getMergedStats() {
-  // Build a cheap cache key from save keys + their rounds counts
-  var cacheKey = Object.keys(state.saves).map(function (k) {
-    return k + ':' + (state.saves[k].rounds || 0);
-  }).join('|');
-  if (_mergedStatsCache && _mergedStatsCacheKey === cacheKey) {
-    return _mergedStatsCache;
-  }
-
-  var m = {
-    total_tokens:     0,
-    total_cost:       0,
-    input_tokens:     0,
-    output_tokens:    0,
-    cache_hit_tokens: 0,
-    cache_miss_tokens:0,
-    input_cost:       0,
-    output_cost:      0,
-    rounds:           0,
-    history:          [],
-    startTime:        Date.now(),
-  };
-  var ah = [];
-  var es = Date.now();
+  var cacheKey = Object.keys(state.saves).map(function (k) { return k + ':' + (state.saves[k].rounds || 0); }).join('|');
+  if (_mergedStatsCache && _mergedStatsCacheKey === cacheKey) return _mergedStatsCache;
+  var m = { total_tokens:0, total_cost:0, input_tokens:0, output_tokens:0,
+            cache_hit_tokens:0, cache_miss_tokens:0, input_cost:0, output_cost:0,
+            rounds:0, history:[], startTime: Date.now() };
+  var ah = [], es = Date.now();
   Object.keys(state.saves).forEach(function (k) {
     var s = state.saves[k];
     m.total_tokens      += s.total_tokens      || 0;
@@ -982,31 +780,24 @@ function getMergedStats() {
   m.startTime = es;
   ah.sort(function (a, b) { return b.timestamp - a.timestamp; });
   m.history = ah.slice(0, 1000);
-
-  _mergedStatsCache = m;
-  _mergedStatsCacheKey = cacheKey;
+  _mergedStatsCache = m; _mergedStatsCacheKey = cacheKey;
   return m;
 }
 
 async function deleteSave(key) {
   if (!key || key === '__all__') return;
   delete state.saves[key];
-  _mergedStatsCache = null;
-  _mergedStatsCacheKey = '';
+  _mergedStatsCache = null; _mergedStatsCacheKey = '';
   saveSaves();
-  
   if (state.lastRealSave === key) {
     state.lastRealSave = '';
     var keys = Object.keys(state.saves);
-    if (keys.length > 0) {
-      state.lastRealSave = keys[0];
-    }
+    if (keys.length > 0) state.lastRealSave = keys[0];
     await saveLastRealSaveKey();
   }
-
   if (state.currentSave === key) {
-    var keys = Object.keys(state.saves);
-    state.currentSave = keys.length > 0 ? keys[0] : null;
+    var keys2 = Object.keys(state.saves);
+    state.currentSave = keys2.length > 0 ? keys2[0] : null;
     if (!state.currentSave) createNewSave();
     await saveCurrentSaveKey();
   }
@@ -1014,346 +805,116 @@ async function deleteSave(key) {
 
 async function handleChatChanged() {
   try {
-    var cn = '';
-    try { cn = getContext().name2 || ''; } catch (e) {}
+    var cn = ''; try { cn = getContext().name2 || ''; } catch (e) {}
     if (!cn) return;
-
-    var keys = Object.keys(state.saves);
-    var matchKey = null;
-    var matchTime = 0;
+    var keys = Object.keys(state.saves), matchKey = null, matchTime = 0;
     keys.forEach(function (k) {
       var s = state.saves[k];
-      if (s && s.character === cn) {
-        if (s.startTime > matchTime) {
-          matchTime = s.startTime;
-          matchKey = k;
-        }
-      }
+      if (s && s.character === cn && s.startTime > matchTime) { matchTime = s.startTime; matchKey = k; }
     });
-
     if (matchKey) {
-      if (state.currentSave !== '__all__') {
-        state.currentSave = matchKey;
-        await saveCurrentSaveKey();
-      }
-      state.lastRealSave = matchKey;
-      await saveLastRealSaveKey();
-      if (isInitDone) refreshUI();
+      if (state.currentSave !== '__all__') { state.currentSave = matchKey; await saveCurrentSaveKey(); }
+      state.lastRealSave = matchKey; await saveLastRealSaveKey();
     } else {
       var isAllMode = (state.currentSave === '__all__');
       var newKey = createNewSave();
-      if (isAllMode) {
-        state.currentSave = '__all__';
-        await saveCurrentSaveKey();
-      }
-      state.lastRealSave = newKey;
-      await saveLastRealSaveKey();
-      if (isInitDone) refreshUI();
+      if (isAllMode) { state.currentSave = '__all__'; await saveCurrentSaveKey(); }
+      state.lastRealSave = newKey; await saveLastRealSaveKey();
     }
-  } catch (e) {
-    console.warn('[DS] handleChatChanged error:', e);
-  }
+    if (isInitDone) refreshUI();
+  } catch (e) { console.warn('[DS] handleChatChanged:', e); }
 }
 
-// ─── Remaining-rounds estimator ───────────────────────────────────────────────
-function calculateRemainingRounds(displaySave) {
-  var bal;
-  if (state.customBalance !== null && state.customBalance !== '') {
-    bal = parseFloat(state.customBalance);
-  } else if (state.balance && state.balance.balance != null) {
-    bal = parseFloat(state.balance.balance);
-  } else {
-    return null;
-  }
-  if (isNaN(bal) || bal <= 0) return null;
+// ─── Channel helpers ──────────────────────────────────────────────────────────
+function getChannels() { return state.settings.channels || []; }
 
-  var s = displaySave;
-  if (!s || (s.rounds || 0) === 0) return null;
-
-  var history = s.history || [];
-  if (history.length === 0) {
-    var avg = (s.total_cost || 0) / s.rounds;
-    return avg > 0 ? Math.floor(bal / avg) : null;
-  }
-
-  // EWMA from oldest to newest (history[0] is newest)
-  var alpha = 0.3;
-  var ewma  = history[history.length - 1].cost || 0;
-  for (var i = history.length - 2; i >= 0; i--) {
-    ewma = alpha * (history[i].cost || 0) + (1 - alpha) * ewma;
-  }
-  return ewma > 0 ? Math.floor(bal / ewma) : null;
+function getChannelById(id) {
+  return getChannels().find(function (ch) { return ch.id === id; }) || null;
 }
 
-// ─── Dynamic Theme and Display Mode Helpers ────────────────────────────────────
-function getDoc() {
-  try {
-    if (window.parent && window.parent.document) {
-      return window.parent.document;
-    }
-  } catch (e) {
-    console.warn("[DS] Cannot access window.parent.document", e);
-  }
-  return document;
-}
-
-function getWin() {
-  return window.parent || window;
-}
-
-
-
-function updateDynamicThemeColors() {
-  try {
-    var p = getWin();
-    var doc = getDoc();
-    var panel = doc.getElementById('ds-panel');
-    if (!panel) return;
-
-    var temp = doc.createElement('div');
-    temp.style.color = 'var(--SmartThemeBlurTintColor)';
-    doc.body.appendChild(temp);
-    var color = p.getComputedStyle(temp).color;
-    doc.body.removeChild(temp);
-
-    var opaqueColor = '#080d14'; // fallback
-    var match = color.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
-    if (match) {
-      opaqueColor = 'rgb(' + match[1] + ', ' + match[2] + ', ' + match[3] + ')';
-    } else if (color.startsWith('#')) {
-      opaqueColor = color;
-    }
-
-    panel.style.setProperty('--ds-bg-opaque', opaqueColor);
-    panel.style.setProperty('--ds-text-color', 'var(--SmartThemeBodyColor, #f3f4f6)');
-    panel.style.setProperty('--ds-border-color', 'var(--SmartThemeBorderColor, #374151)');
-    panel.style.setProperty('--ds-shadow-color', 'var(--SmartThemeShadowColor, rgba(0,0,0,0.5))');
-  } catch (e) {
-    console.warn('[DS] updateDynamicThemeColors error:', e);
-  }
-}
-
-function applyDisplayMode() {
-  var mode = state.settings.displayMode || 'wand-modal';
-  var doc = getDoc();
-  var panel = doc.getElementById('ds-panel');
-  if (panel) {
-    panel.classList.remove('ds-fullscreen', 'ds-qr-top', 'ds-qr-bottom', 'ds-qr-left', 'ds-qr-right');
-    if (mode === 'wand-fullscreen') {
-      panel.classList.add('ds-fullscreen');
-    } else if (mode === 'qr-top') {
-      panel.classList.add('ds-qr-top');
-    } else if (mode === 'qr-bottom') {
-      panel.classList.add('ds-qr-bottom');
-    } else if (mode === 'qr-left') {
-      panel.classList.add('ds-qr-left');
-    } else if (mode === 'qr-right') {
-      panel.classList.add('ds-qr-right');
-    }
-  }
-
-  var wandBtn = doc.getElementById('ds_wand_container');
-  if (wandBtn) {
-    if (mode === 'wand-modal' || mode === 'wand-fullscreen') {
-      wandBtn.style.setProperty('display', 'flex', 'important');
-    } else {
-      wandBtn.style.setProperty('display', 'none', 'important');
-    }
-  }
-
-  ensureWalletButton();
-}
-
-function ensureWalletButton() {
-  var mode = state.settings.displayMode || 'wand-modal';
-  if (mode.indexOf('qr-') !== 0) {
-    removeWalletButton();
-    return;
-  }
-
-  var doc = getDoc();
-  var btnContainer = doc.querySelector('#qr--bar .qr--buttons') || doc.getElementById('qr--bar');
-  if (!btnContainer) return;
-
-  var btn = doc.getElementById('ds-qr-wallet-btn');
-  if (btn) {
-    if (!btnContainer.contains(btn)) {
-      btnContainer.appendChild(btn);
-    }
-    return;
-  }
-
-  btn = doc.createElement('div');
-  btn.id = 'ds-qr-wallet-btn';
-  btn.className = 'qr--button menu_button interactable';
-  btn.tabIndex = 0;
-  btn.role = 'button';
-  btn.title = 'DeepSeek使用统计';
-  btn.innerHTML = '<i class="fa-solid fa-wallet"></i>';
-  
-  // Adaptive style
-  btn.style.setProperty('display', 'inline-flex', 'important');
-  btn.style.alignItems = 'center';
-  btn.style.justifyContent = 'center';
-  btn.style.color = 'var(--SmartThemeBodyColor, #f3f4f6)';
-  btn.style.transition = 'background-color 0.2s, transform 0.1s';
-  
-  btn.addEventListener('mouseenter', function() {
-    btn.style.background = 'rgba(255, 255, 255, 0.15)';
-    btn.style.transform = 'scale(1.05)';
-  });
-  btn.addEventListener('mouseleave', function() {
-    btn.style.background = 'transparent';
-    btn.style.transform = 'scale(1)';
-  });
-  btn.addEventListener('click', function(e) {
-    e.preventDefault();
-    e.stopPropagation();
-    togglePanel();
-  });
-
-  btnContainer.appendChild(btn);
-}
-
-function removeWalletButton() {
-  var doc = getDoc();
-  var btn = doc.getElementById('ds-qr-wallet-btn');
-  if (btn) btn.remove();
-}
-
-function initWalletButtonObserver() {
-  try {
-    var doc = getDoc();
-    var win = getWin();
-    var MutationObserverClass = win.MutationObserver || win.parent?.MutationObserver || window.MutationObserver;
-    if (!MutationObserverClass) return;
-
-    if (walletBtnObserver) {
-      walletBtnObserver.disconnect();
-    }
-
-    walletBtnObserver = new MutationObserverClass(function () {
-      var mode = state.settings.displayMode || 'wand-modal';
-      if (mode.indexOf('qr-') === 0) {
-        ensureWalletButton();
-      }
-    });
-
-    walletBtnObserver.observe(doc.body, { childList: true, subtree: true });
-  } catch (e) {
-    console.warn('[DS] Failed to initialize Wallet Button Observer:', e);
-  }
-}
-
-// ─── Event setup ──────────────────────────────────────────────────────────────
-function setupEvents() {
-  eventSource.on(event_types.MESSAGE_RECEIVED, function () {
-    setTimeout(refreshUI, 500);
-  });
-  eventSource.on(event_types.CHAT_CHANGED, function () {
-    setTimeout(handleChatChanged, 500);
-  });
-}
-
-// ─── Fetch interception ───────────────────────────────────────────────────────
-function patchFetch() {
-  var p = window.parent || window;
-  if (p._ds_fetch_patched) return;
-  var rawFetch = p.fetch;
-
-  p.fetch = function () {
-    var args = arguments;
-    var url  = typeof args[0] === 'string' ? args[0] : (args[0] && args[0].url);
-
-    if (url && url.indexOf(TARGET_API) !== -1) {
-      // Parse request body for messages snapshot
-      var capturedMessages = null;
-      try {
-        if (args[1] && typeof args[1].body === 'string') {
-          var reqPayload = JSON.parse(args[1].body);
-          if (reqPayload && Array.isArray(reqPayload.messages)) {
-            capturedMessages = reqPayload.messages.map(function (m) {
-              var t = m.content || m.text || '';
-              return {
-                role: m.role || 'unknown',
-                text: t,
-                length: t.length,
-                hash: createTextHash(t)
-              };
-            });
-          }
+// Returns { channel, rule, prices, pricingType } or null
+function matchChannelForModel(model, timestamp) {
+  if (!model) return null;
+  var m = model.toLowerCase();
+  var ts = timestamp || Date.now();
+  var channels = getChannels();
+  for (var ci = 0; ci < channels.length; ci++) {
+    var ch = channels[ci];
+    var rules = ch.pricingRules || [];
+    for (var ri = 0; ri < rules.length; ri++) {
+      var rule = rules[ri];
+      if (!rule.enabled) continue;
+      if (!rule.pattern) continue;
+      if (m.indexOf(rule.pattern.toLowerCase()) === -1) continue;
+      // Matched!
+      var p, pricingType = 'match';
+      if (rule.peak && rule.offpeak && ch.useNewPricing) {
+        var afterDate = !ch.newPricingDate || ts >= ch.newPricingDate;
+        if (afterDate) {
+          var peak = isPeakHour(ts);
+          p = peak ? rule.peak : rule.offpeak;
+          pricingType = peak ? 'peak' : 'offpeak';
+        } else {
+          p = { hit: rule.hit, miss: rule.miss, output: rule.output };
         }
-      } catch (e) {
-        console.warn('[DS] Failed to parse request body for messages:', e);
+      } else {
+        p = { hit: rule.hit, miss: rule.miss, output: rule.output };
       }
-
-      // Bug fix #10 (debug mode): do NOT fake a Response that SillyTavern tries
-      // to parse — instead still call the real fetch but inject usage afterwards
-      // via setTimeout so the real response flow is unaffected.
-      if (state.settings.debug) {
-        var fakeUsage = {
-          prompt_cache_hit_tokens:  state.settings.debugHit,
-          prompt_cache_miss_tokens: state.settings.debugMiss,
-          completion_tokens:        state.settings.debugOutput,
-          total_tokens: state.settings.debugHit + state.settings.debugMiss + state.settings.debugOutput,
-        };
-        // Bug fix #2 (model override): pass the debug model explicitly and
-        // DO NOT let processUsage override it from getContext().model
-        setTimeout(function () {
-          processUsage(fakeUsage, state.settings.debugModel, true /*isDebug*/, capturedMessages, 'debug-' + Date.now());
-        }, 100);
-        // Still let the real request through so SillyTavern works normally
-        return rawFetch.apply(p, args);
-      }
-
-      return rawFetch.apply(p, args).then(function (res) {
-        var clone = res.clone();
-        clone.text().then(function (text) {
-          try {
-            var data    = null;
-            var trimmed = text.trim();
-            var resId   = '';
-            if (trimmed.startsWith('{')) {
-              data = JSON.parse(trimmed);
-              if (data && data.id) resId = data.id;
-            } else {
-              // SSE stream — take the LAST chunk that contains usage
-              text.split('\n').forEach(function (line) {
-                if (line.startsWith('data: ') && line !== 'data: [DONE]') {
-                  try {
-                    var chunk = JSON.parse(line.substring(6));
-                    if (chunk.id) resId = chunk.id;
-                    if (chunk.usage) data = chunk;
-                  } catch (e) {}
-                }
-              });
-            }
-            if (data && data.usage) {
-              // Bug fix #2: pass model from API response; processUsage will not
-              // override it from getContext() when it is already valid
-              processUsage(data.usage, data.model || '', false, capturedMessages, resId);
-            }
-          } catch (e) {}
-        }).catch(function () {});
-        return res;
-      });
+      return { channel: ch, rule: rule, prices: p, pricingType: pricingType };
     }
+  }
+  return null;
+}
 
-    return rawFetch.apply(p, args);
+// ─── Peak hour detection ──────────────────────────────────────────────────────
+function isPeakHour(timestamp) {
+  var d = new Date(timestamp);
+  var totalMinutes = (d.getUTCHours() * 60 + d.getUTCMinutes() + 8 * 60) % 1440;
+  return (totalMinutes >= 540 && totalMinutes < 720) || (totalMinutes >= 840 && totalMinutes < 1080);
+}
+
+// ─── Cost calculation (uses channel rules) ────────────────────────────────────
+function calcCost(u) {
+  var timestamp = u.timestamp || Date.now();
+  var model = u.model || '';
+  var match = matchChannelForModel(model, timestamp);
+  if (!match) {
+    return { input: 0, output: 0, total: 0, pricingType: 'unknown',
+             channelId: '', channelName: '', ruleName: '', hitPrice: 0, missPrice: 0, outputPrice: 0 };
+  }
+  var p = match.prices;
+  var ih = (u.prompt_cache_hit_tokens  / 1e6) * p.hit;
+  var im = (u.prompt_cache_miss_tokens / 1e6) * p.miss;
+  var o  = (u.completion_tokens        / 1e6) * p.output;
+  return {
+    input:       ih + im,
+    output:      o,
+    total:       ih + im + o,
+    pricingType: match.pricingType,
+    channelId:   match.channel.id,
+    channelName: match.channel.name,
+    ruleName:    match.rule.label || match.rule.pattern,
+    hitPrice:    p.hit,
+    missPrice:   p.miss,
+    outputPrice: p.output,
   };
+}
 
-  p._ds_fetch_patched = true;
+// ─── Hash & dedup ─────────────────────────────────────────────────────────────
+function createTextHash(text) {
+  if (typeof text !== 'string') return '';
+  var hash = 2166136261;
+  for (var i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul ? Math.imul(hash, 16777619) : (hash * 16777619) | 0;
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0');
 }
 
 // ─── Usage processing ─────────────────────────────────────────────────────────
-// Bug fix #1 + #2: write to the REAL current save (not the virtual merged object)
-// and respect the model passed in rather than always overriding from getContext()
 async function processUsage(usage, model, isDebug, messages, requestId) {
-  // Resolve model name: prefer what the API returned, then context, then fallback
   var modelName = (model && model.trim()) ? model.trim() : '';
-  if (!modelName && !isDebug) {
-    try { modelName = getContext().model || ''; } catch (e) {}
-  }
+  if (!modelName && !isDebug) { try { modelName = getContext().model || ''; } catch (e) {} }
   if (!modelName) modelName = 'deepseek-v4-flash';
 
   var totalPrompt = usage.prompt_tokens || 0;
@@ -1363,55 +924,36 @@ async function processUsage(usage, model, isDebug, messages, requestId) {
   } else if (usage.prompt_tokens_details && usage.prompt_tokens_details.cached_tokens !== undefined) {
     hit = usage.prompt_tokens_details.cached_tokens || 0;
   }
-
-  var miss = 0;
-  if (usage.prompt_cache_miss_tokens !== undefined) {
-    miss = usage.prompt_cache_miss_tokens || 0;
-  } else {
-    miss = Math.max(0, totalPrompt - hit);
-  }
-  var comp  = usage.completion_tokens        || 0;
+  var miss = usage.prompt_cache_miss_tokens !== undefined
+    ? (usage.prompt_cache_miss_tokens || 0)
+    : Math.max(0, totalPrompt - hit);
+  var comp  = usage.completion_tokens || 0;
   var total = usage.total_tokens || (hit + miss + comp);
 
-  // Deduplicate requests
+  // Deduplication
   if (requestId) {
-    if (processedRequestIds.indexOf(requestId) !== -1) {
-      console.log('[DS] Duplicate usage processing skipped for requestId:', requestId);
-      return;
-    }
+    if (processedRequestIds.indexOf(requestId) !== -1) return;
     processedRequestIds.push(requestId);
-    if (processedRequestIds.length > 100) {
-      processedRequestIds.shift();
-    }
+    if (processedRequestIds.length > 100) processedRequestIds.shift();
   } else {
-    // Fallback deduplication: check signature and 5-second time window
-    var msgSig = '';
-    if (messages && messages.length > 0) {
-      msgSig = messages.map(function (m) { return m.hash || ''; }).join(',');
-    }
+    var msgSig = (messages && messages.length > 0) ? messages.map(function (m) { return m.hash || ''; }).join(',') : '';
     var signature = msgSig + '_' + hit + '_' + miss + '_' + comp + '_' + modelName;
     var now = Date.now();
-    if (signature === lastProcessedSignature && (now - lastProcessedTime) < 5000) {
-      console.log('[DS] Duplicate usage processing skipped for signature:', signature);
-      return;
-    }
-    lastProcessedSignature = signature;
-    lastProcessedTime = now;
+    if (signature === lastProcessedSignature && (now - lastProcessedTime) < 5000) return;
+    lastProcessedSignature = signature; lastProcessedTime = now;
   }
 
   var lu = {
-    timestamp:               Date.now(),
-    model:                   modelName,
-    prompt_tokens:           hit + miss,
+    timestamp: Date.now(), model: modelName,
+    prompt_tokens: hit + miss,
     prompt_cache_hit_tokens: hit,
-    prompt_cache_miss_tokens:miss,
-    completion_tokens:       comp,
-    total_tokens:            total,
+    prompt_cache_miss_tokens: miss,
+    completion_tokens: comp,
+    total_tokens: total,
   };
-  lu.cost    = calcCost(lu);
+  lu.cost = calcCost(lu);
   state.lastUsage = lu;
 
-  // Bug fix #1: always write to the REAL save, not the virtual __all__ object
   var s = getRealCurrentSave();
   if (!s) return;
 
@@ -1426,626 +968,471 @@ async function processUsage(usage, model, isDebug, messages, requestId) {
   s.rounds            += 1;
 
   s.history.unshift({
-    timestamp:        lu.timestamp,
-    model:            lu.model,
-    prompt_tokens:    lu.prompt_tokens,
-    cache_hit_tokens: lu.prompt_cache_hit_tokens,
-    cache_miss_tokens:lu.prompt_cache_miss_tokens,
-    completion_tokens:lu.completion_tokens,
-    total_tokens:     lu.total_tokens,
-    input_cost:       lu.cost.input,
-    output_cost:      lu.cost.output,
-    cost:             lu.cost.total,
-    pricingType:      lu.cost.pricingType,
-    cache_hit_rate:   lu.prompt_tokens > 0
-                        ? (lu.prompt_cache_hit_tokens / lu.prompt_tokens * 100)
-                        : 0,
-    messages:         messages || [],
+    timestamp:         lu.timestamp,
+    model:             lu.model,
+    prompt_tokens:     lu.prompt_tokens,
+    cache_hit_tokens:  lu.prompt_cache_hit_tokens,
+    cache_miss_tokens: lu.prompt_cache_miss_tokens,
+    completion_tokens: lu.completion_tokens,
+    total_tokens:      lu.total_tokens,
+    input_cost:        lu.cost.input,
+    output_cost:       lu.cost.output,
+    cost:              lu.cost.total,
+    pricingType:       lu.cost.pricingType,
+    channelId:         lu.cost.channelId,
+    channelName:       lu.cost.channelName,
+    ruleName:          lu.cost.ruleName,
+    hitPrice:          lu.cost.hitPrice,
+    missPrice:         lu.cost.missPrice,
+    cache_hit_rate:    lu.prompt_tokens > 0 ? (lu.prompt_cache_hit_tokens / lu.prompt_tokens * 100) : 0,
+    messages:          messages || [],
   });
 
-  // Prune older history items to only keep prompt messages for the last 10 rounds
   for (var i = 10; i < s.history.length; i++) {
-    if (s.history[i].messages) {
-      delete s.history[i].messages;
-    }
+    if (s.history[i].messages) delete s.history[i].messages;
   }
-
   if (s.history.length > 1000) s.history = s.history.slice(0, 1000);
 
   saveSaves();
 
-  // Deduct from whichever balance is active
-  if (state.customBalance !== null && state.customBalance !== '') {
-    var newCB = parseFloat(state.customBalance) - lu.cost.total;
-    state.customBalance = String(newCB);
-    await saveDataAsync(CUSTOM_BALANCE_STORAGE, state.customBalance);
-  } else if (state.balance && state.balance.balance != null) {
-    state.balance.balance = parseFloat(state.balance.balance) - lu.cost.total;
-    await saveDataAsync(BALANCE_STORAGE, JSON.stringify(state.balance));
+  // Deduct balance only for priced requests
+  if (lu.cost.pricingType !== 'unknown' && lu.cost.channelId) {
+    var ch = getChannelById(lu.cost.channelId);
+    if (ch) {
+      if (ch.customBalance !== null && ch.customBalance !== '') {
+        ch.customBalance = String(parseFloat(ch.customBalance) - lu.cost.total);
+        await saveSettings();
+      } else if (ch.balance && ch.balance.balance != null) {
+        ch.balance.balance = parseFloat(ch.balance.balance) - lu.cost.total;
+        await saveSettings();
+      }
+
+      // Per-channel auto-balance
+      ch.messageCount = (ch.messageCount || 0) + 1;
+      if (ch.autoBalance && ch.apiKey && ch.messageCount >= (ch.balanceInterval || 10)) {
+        ch.messageCount = 0;
+        await saveSettings();
+        fetchChannelBalance(ch, true);
+      }
+    }
   }
 
   state.messageCount++;
   await saveMessageCount();
 
-  if (state.settings.autoBalance && state.apiKey &&
-      state.messageCount >= state.settings.balanceInterval) {
-    state.messageCount = 0;
-    await saveMessageCount();
-    autoQueryBalance();
+  refreshUI();
+}
+
+// ─── Balance API (per-channel) ────────────────────────────────────────────────
+async function fetchChannelBalance(ch, silent) {
+  if (!ch) return;
+  if (!ch.apiKey) {
+    if (!silent) updateChannelBalanceStatus(ch.id, '请先输入API密钥', null);
+    return;
+  }
+  if (ch.balanceQueryType !== 'deepseek' && ch.balanceQueryType !== 'openai') {
+    if (!silent) updateChannelBalanceStatus(ch.id, '该渠道无余额查询接口', null);
+    return;
+  }
+
+  if (!silent) updateChannelBalanceStatus(ch.id, '查询中...', null);
+
+  try {
+    var url = ch.balanceQueryType === 'deepseek'
+      ? 'https://api.deepseek.com/user/balance'
+      : (ch.balanceQueryUrl || '');
+    if (!url) { if (!silent) updateChannelBalanceStatus(ch.id, '未配置查询地址', null); return; }
+
+    var r = await fetch(url, {
+      method: 'GET',
+      headers: { 'Authorization': 'Bearer ' + ch.apiKey, 'Content-Type': 'application/json' },
+    });
+    var d = await r.json();
+
+    // DeepSeek format
+    if (ch.balanceQueryType === 'deepseek' && d.is_available && d.balance_infos && d.balance_infos.length > 0) {
+      var info = d.balance_infos[0];
+      ch.balance = { balance: info.total_balance, currency: info.currency, available: d.is_available, timestamp: Date.now() };
+      await saveSettings();
+      if (!silent) updateChannelBalanceStatus(ch.id, '账户可用 | ' + new Date().toLocaleTimeString('zh-CN'), ch.balance);
+    }
+    // OpenAI format: no standard balance endpoint; just show error
+    else if (!silent) {
+      var msg = (d.error && d.error.message) ? d.error.message : '查询失败';
+      updateChannelBalanceStatus(ch.id, msg, null);
+    }
+  } catch (e) {
+    if (!silent) updateChannelBalanceStatus(ch.id, e.message || '网络错误', null);
   }
 
   refreshUI();
 }
 
-// ─── Cost calculation ─────────────────────────────────────────────────────────
-function isPeakHour(timestamp) {
-  var d = new Date(timestamp);
-  var totalMinutes = (d.getUTCHours() * 60 + d.getUTCMinutes() + 8 * 60) % 1440;
-  return (totalMinutes >= 540 && totalMinutes < 720) || (totalMinutes >= 840 && totalMinutes < 1080);
+function updateChannelBalanceStatus(chId, statusText, balance) {
+  // Status is shown in the balance cards, just trigger a refresh
+  refreshUI();
 }
 
-function calcCost(u) {
-  var timestamp = u.timestamp || Date.now();
-  var model = u.model || 'deepseek-v4-flash';
-
-  var useNew = state.settings.useNewPricing;
-  if (useNew && state.settings.newPricingDate) {
-    if (timestamp < state.settings.newPricingDate) {
-      useNew = false;
-    }
-  }
-
-  // Normalize model name for pricing lookup
-  var normModel = 'deepseek-v4-flash';
-  if (typeof model === 'string') {
-    var m = model.toLowerCase();
-    if (m.indexOf('reasoner') !== -1) {
-      normModel = 'deepseek-reasoner';
-    } else if (m.indexOf('pro') !== -1) {
-      normModel = 'deepseek-v4-pro';
-    } else if (m.indexOf('chat') !== -1) {
-      normModel = 'deepseek-chat';
-    } else if (m.indexOf('flash') !== -1) {
-      normModel = 'deepseek-v4-flash';
-    }
-  }
-
-  var p;
-  var pricingType = 'legacy';
-  if (useNew) {
-    var modelPricing = PRICING.new[normModel] || PRICING.new['deepseek-v4-flash'];
-    var peak = isPeakHour(timestamp);
-    p = peak ? modelPricing.peak : modelPricing.offpeak;
-    pricingType = peak ? 'peak' : 'offpeak';
-  } else {
-    p = PRICING[normModel] || PRICING['deepseek-v4-flash'];
-  }
-
-  var ih = (u.prompt_cache_hit_tokens  / 1e6) * p.hit;
-  var im = (u.prompt_cache_miss_tokens / 1e6) * p.miss;
-  var o  = (u.completion_tokens        / 1e6) * p.output;
-  return { input: ih + im, output: o, total: ih + im + o, pricingType: pricingType };
+// ─── Remaining rounds estimate (per-channel) ──────────────────────────────────
+function calculateRemainingRoundsForChannel(chHistory, availBal) {
+  if (!availBal || availBal <= 0 || !chHistory || chHistory.length === 0) return null;
+  var alpha = 0.3;
+  var costs = chHistory.filter(function (h) { return (h.cost || 0) > 0; });
+  if (costs.length === 0) return null;
+  var ewma = costs[costs.length - 1].cost || 0;
+  for (var i = costs.length - 2; i >= 0; i--) ewma = alpha * (costs[i].cost || 0) + (1 - alpha) * ewma;
+  return ewma > 0 ? Math.floor(availBal / ewma) : null;
 }
 
-function createTextHash(text) {
-  if (typeof text !== 'string') return '';
-  var hash = 2166136261;
-  for (var i = 0; i < text.length; i++) {
-    hash ^= text.charCodeAt(i);
-    hash = Math.imul ? Math.imul(hash, 16777619) : (hash * 16777619) | 0;
-  }
-  return (hash >>> 0).toString(16).padStart(8, '0');
-}
-
-function commonPrefixLength(left, right) {
-  var maxLength = Math.min(left.length, right.length);
-  var index = 0;
-  while (index < maxLength && left.charCodeAt(index) === right.charCodeAt(index)) {
-    index += 1;
-  }
-  return index;
-}
-
-function commonSuffixLength(left, right, prefixLength) {
-  var leftIndex = left.length - 1;
-  var rightIndex = right.length - 1;
-  var length = 0;
-
-  while (leftIndex >= prefixLength && rightIndex >= prefixLength && left.charCodeAt(leftIndex) === right.charCodeAt(rightIndex)) {
-    leftIndex -= 1;
-    rightIndex -= 1;
-    length += 1;
-  }
-
-  return length;
-}
-
-function buildDiffContext(beforeText, afterText, contextSize) {
-  if (!contextSize) contextSize = 800;
-  var prefixLength = commonPrefixLength(beforeText, afterText);
-  var suffixLength = commonSuffixLength(beforeText, afterText, prefixLength);
-  var beforeEnd = beforeText.length - suffixLength;
-  var afterEnd = afterText.length - suffixLength;
-  var beforeChanged = beforeText.slice(prefixLength, beforeEnd);
-  var afterChanged = afterText.slice(prefixLength, afterEnd);
-  var prefixStart = Math.max(0, prefixLength - contextSize);
-  var suffixEnd = Math.min(beforeText.length, beforeEnd + contextSize);
-
-  return {
-    prefix: beforeText.slice(prefixStart, prefixLength),
-    beforeChanged: beforeChanged.slice(0, contextSize * 2),
-    afterChanged: afterChanged.slice(0, contextSize * 2),
-    suffix: beforeText.slice(beforeEnd, suffixEnd),
-    prefixLength: prefixLength,
-    suffixLength: suffixLength,
-    beforeChangedLength: beforeChanged.length,
-    afterChangedLength: afterChanged.length,
-    hasMorePrefix: prefixStart > 0,
-    hasMoreSuffix: suffixEnd < beforeText.length,
-  };
-}
-
-function comparePromptRecords(before, after, contextSize) {
-  if (!contextSize) contextSize = 800;
-  if (!before || !after) {
-    return { kind: 'same', summary: '请选择旧请求和新请求进行对比。', context: null };
-  }
-
-  var beforeMessages = before.messages || [];
-  var afterMessages = after.messages || [];
-
-  var filterEmpty = function (msgs) {
-    return msgs.map(function (m, idx) { return { index: idx, message: m }; })
-               .filter(function (item) { return item.message.text.trim().length > 0; });
-  };
-
-  var beforeComp = filterEmpty(beforeMessages);
-  var afterComp = filterEmpty(afterMessages);
-
-  var maxLength = Math.max(beforeComp.length, afterComp.length);
-
-  for (var i = 0; i < maxLength; i++) {
-    var beforeItem = beforeComp[i];
-    var afterItem = afterComp[i];
-    var beforeMsg = beforeItem ? beforeItem.message : null;
-    var afterMsg = afterItem ? afterItem.message : null;
-
-    if (!beforeMsg && afterMsg) {
-      return {
-        kind: 'message_added',
-        summary: '第 ' + (afterItem.index + 1) + ' 条有效消息是新增的。',
-        index: afterItem.index,
-        beforeIndex: null,
-        afterIndex: afterItem.index,
-        beforeRole: null,
-        afterRole: afterMsg.role,
-        beforeLength: 0,
-        afterLength: afterMsg.length,
-        context: buildDiffContext('', afterMsg.text, contextSize)
-      };
-    }
-
-    if (beforeMsg && !afterMsg) {
-      return {
-        kind: 'message_removed',
-        summary: '第 ' + (beforeItem.index + 1) + ' 条有效消息被移除。',
-        index: beforeItem.index,
-        beforeIndex: beforeItem.index,
-        afterIndex: null,
-        beforeRole: beforeMsg.role,
-        afterRole: null,
-        beforeLength: beforeMsg.length,
-        afterLength: 0,
-        context: buildDiffContext(beforeMsg.text, '', contextSize)
-      };
-    }
-
-    if (beforeMsg.role !== afterMsg.role) {
-      return {
-        kind: 'role_changed',
-        summary: '第 ' + (afterItem.index + 1) + ' 条有效消息的角色从 ' + beforeMsg.role + ' 变更为 ' + afterMsg.role + '。',
-        index: afterItem.index,
-        beforeIndex: beforeItem.index,
-        afterIndex: afterItem.index,
-        beforeRole: beforeMsg.role,
-        afterRole: afterMsg.role,
-        beforeLength: beforeMsg.length,
-        afterLength: afterMsg.length,
-        context: buildDiffContext(beforeMsg.text, afterMsg.text, contextSize)
-      };
-    }
-
-    if (beforeMsg.hash !== afterMsg.hash || beforeMsg.text !== afterMsg.text) {
-      return {
-        kind: 'content_changed',
-        summary: '第 ' + (afterItem.index + 1) + ' 条有效 ' + afterMsg.role + ' 消息内容发生变化。',
-        index: afterItem.index,
-        beforeIndex: beforeItem.index,
-        afterIndex: afterItem.index,
-        beforeRole: beforeMsg.role,
-        afterRole: afterMsg.role,
-        beforeLength: beforeMsg.length,
-        afterLength: afterMsg.length,
-        context: buildDiffContext(beforeMsg.text, afterMsg.text, contextSize)
-      };
-    }
-  }
-
-  return {
-    kind: 'same',
-    summary: '两次请求的有效消息内容完全一致。',
-    index: null,
-    beforeIndex: null,
-    afterIndex: null,
-    beforeRole: null,
-    afterRole: null,
-    beforeLength: 0,
-    afterLength: 0,
-    context: null
-  };
-}
-
-// ─── XOR key encryption (obfuscation, NOT security) ───────────────────────────
+// ─── XOR encryption ───────────────────────────────────────────────────────────
 var XOR_KEY = 'ds-stats-v1-xor-key!@#$%^&*';
-
 function encryptKey(plaintext) {
   if (!plaintext) return '';
   var result = '';
-  for (var i = 0; i < plaintext.length; i++) {
-    result += String.fromCharCode(
-      plaintext.charCodeAt(i) ^ XOR_KEY.charCodeAt(i % XOR_KEY.length)
-    );
-  }
+  for (var i = 0; i < plaintext.length; i++) result += String.fromCharCode(plaintext.charCodeAt(i) ^ XOR_KEY.charCodeAt(i % XOR_KEY.length));
   return btoa(result);
 }
-
 function decryptKey(ciphertext) {
   if (!ciphertext) return '';
   try {
-    var decoded = atob(ciphertext);
-    var result  = '';
-    for (var i = 0; i < decoded.length; i++) {
-      result += String.fromCharCode(
-        decoded.charCodeAt(i) ^ XOR_KEY.charCodeAt(i % XOR_KEY.length)
-      );
-    }
+    var decoded = atob(ciphertext), result = '';
+    for (var i = 0; i < decoded.length; i++) result += String.fromCharCode(decoded.charCodeAt(i) ^ XOR_KEY.charCodeAt(i % XOR_KEY.length));
     return result;
-  } catch (e) {
-    return ciphertext; // already plaintext (legacy)
-  }
+  } catch (e) { return ciphertext; }
 }
 
-async function saveApiKey(key) {
-  await saveDataAsync(KEY_STORAGE, encryptKey(key));
-  state.apiKey = key;
+// ─── Diff utilities ───────────────────────────────────────────────────────────
+function commonPrefixLength(left, right) {
+  var max = Math.min(left.length, right.length), i = 0;
+  while (i < max && left.charCodeAt(i) === right.charCodeAt(i)) i++;
+  return i;
 }
-
-async function saveBalanceData(data) {
-  state.balance = data;
-  await saveDataAsync(BALANCE_STORAGE, JSON.stringify(data));
+function commonSuffixLength(left, right, prefixLength) {
+  var li = left.length - 1, ri = right.length - 1, len = 0;
+  while (li >= prefixLength && ri >= prefixLength && left.charCodeAt(li) === right.charCodeAt(ri)) { li--; ri--; len++; }
+  return len;
 }
-
-// ─── Balance API ──────────────────────────────────────────────────────────────
-async function fetchBalance(silent) {
-  if (!state.apiKey) {
-    if (!silent) {
-      var doc = getDoc();
-      var seEl = doc.getElementById('ds-balance-status');
-      if (seEl) seEl.textContent = '请先输入API密钥';
-    }
-    return;
-  }
-
-  var doc = getDoc();
-  var seEl = doc.getElementById('ds-balance-status');
-  var beEl = doc.getElementById('ds-balance');
-  var btn  = doc.getElementById('ds-btn-query-balance');
-
-  if (!silent) {
-    if (btn) btn.textContent = '查询中...';
-    if (seEl) seEl.textContent = '正在查询...';
-  }
-
-  try {
-    var r = await fetch('https://api.deepseek.com/user/balance', {
-      method: 'GET',
-      headers: {
-        'Authorization': 'Bearer ' + state.apiKey,
-        'Content-Type':  'application/json',
-      },
-    });
-    var d = await r.json();
-
-    if (d.is_available && d.balance_infos && d.balance_infos.length > 0) {
-      var info = d.balance_infos[0];
-      await saveBalanceData({
-        balance:   info.total_balance,
-        currency:  info.currency,
-        available: d.is_available,
-        timestamp: Date.now(),
-      });
-      if (state.customBalance === null || state.customBalance === '') {
-        if (beEl) beEl.textContent = '¥' + info.total_balance + ' ' + info.currency;
-        if (seEl) seEl.textContent = '账户可用 | ' + new Date().toLocaleTimeString('zh-CN');
-      } else {
-        if (!silent && seEl) seEl.textContent = '自定义余额略过 | API: ¥' + info.total_balance;
-      }
-    } else {
-      if (!silent) {
-        if (beEl) beEl.textContent = '查询失败';
-        if (seEl) seEl.textContent = d.error ? d.error.message : '请检查密钥';
-      }
-    }
-  } catch (e) {
-    if (!silent) {
-      if (beEl) beEl.textContent = '网络错误';
-      if (seEl) seEl.textContent = e.message;
-    }
-  }
-
-  if (!silent && btn) btn.textContent = '查询';
+function buildDiffContext(beforeText, afterText, contextSize) {
+  if (!contextSize) contextSize = 800;
+  var pl = commonPrefixLength(beforeText, afterText);
+  var sl = commonSuffixLength(beforeText, afterText, pl);
+  var be = beforeText.length - sl, ae = afterText.length - sl;
+  var ps = Math.max(0, pl - contextSize), se2 = Math.min(beforeText.length, be + contextSize);
+  return {
+    prefix: beforeText.slice(ps, pl),
+    beforeChanged: beforeText.slice(pl, be).slice(0, contextSize * 2),
+    afterChanged: afterText.slice(pl, ae).slice(0, contextSize * 2),
+    suffix: beforeText.slice(be, se2),
+    prefixLength: pl, suffixLength: sl,
+    beforeChangedLength: beforeText.slice(pl, be).length,
+    afterChangedLength:  afterText.slice(pl, ae).length,
+    hasMorePrefix: ps > 0, hasMoreSuffix: se2 < beforeText.length,
+  };
 }
-
-function queryBalance()     { return fetchBalance(false); }
-function autoQueryBalance() { return fetchBalance(true);  }
+function comparePromptRecords(before, after, contextSize) {
+  if (!contextSize) contextSize = 800;
+  if (!before || !after) return { kind: 'same', summary: '请选择旧请求和新请求进行对比。', context: null };
+  var bm = before.messages || [], am = after.messages || [];
+  var filterEmpty = function (msgs) {
+    return msgs.map(function (m, idx) { return { index: idx, message: m }; }).filter(function (item) { return item.message.text.trim().length > 0; });
+  };
+  var bc = filterEmpty(bm), ac = filterEmpty(am);
+  var maxLen = Math.max(bc.length, ac.length);
+  for (var i = 0; i < maxLen; i++) {
+    var bi = bc[i], ai = ac[i];
+    var bMsg = bi ? bi.message : null, aMsg = ai ? ai.message : null;
+    if (!bMsg && aMsg) return { kind: 'message_added', summary: '第 ' + (ai.index + 1) + ' 条有效消息是新增的。', index: ai.index, beforeIndex: null, afterIndex: ai.index, beforeRole: null, afterRole: aMsg.role, beforeLength: 0, afterLength: aMsg.length, context: buildDiffContext('', aMsg.text, contextSize) };
+    if (bMsg && !aMsg) return { kind: 'message_removed', summary: '第 ' + (bi.index + 1) + ' 条有效消息被移除。', index: bi.index, beforeIndex: bi.index, afterIndex: null, beforeRole: bMsg.role, afterRole: null, beforeLength: bMsg.length, afterLength: 0, context: buildDiffContext(bMsg.text, '', contextSize) };
+    if (bMsg.role !== aMsg.role) return { kind: 'role_changed', summary: '第 ' + (ai.index + 1) + ' 条有效消息的角色从 ' + bMsg.role + ' 变更为 ' + aMsg.role + '。', index: ai.index, beforeIndex: bi.index, afterIndex: ai.index, beforeRole: bMsg.role, afterRole: aMsg.role, beforeLength: bMsg.length, afterLength: aMsg.length, context: buildDiffContext(bMsg.text, aMsg.text, contextSize) };
+    if (bMsg.hash !== aMsg.hash || bMsg.text !== aMsg.text) return { kind: 'content_changed', summary: '第 ' + (ai.index + 1) + ' 条有效 ' + aMsg.role + ' 消息内容发生变化。', index: ai.index, beforeIndex: bi.index, afterIndex: ai.index, beforeRole: bMsg.role, afterRole: aMsg.role, beforeLength: bMsg.length, afterLength: aMsg.length, context: buildDiffContext(bMsg.text, aMsg.text, contextSize) };
+  }
+  return { kind: 'same', summary: '两次请求的有效消息内容完全一致。', index: null, beforeIndex: null, afterIndex: null, beforeRole: null, afterRole: null, beforeLength: 0, afterLength: 0, context: null };
+}
 
 // ─── Utility ──────────────────────────────────────────────────────────────────
 function formatStartTime(ts) {
   if (!ts) return '';
   var d = new Date(ts);
-  return d.toLocaleDateString('zh-CN') + ' ' +
-         d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+  return d.toLocaleDateString('zh-CN') + ' ' + d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+}
+function formatTokens(val) {
+  var num = parseFloat(val) || 0;
+  if (num >= 10000) return (num / 10000).toFixed(1) + '万';
+  if (num >= 1000)  return (num / 1000).toFixed(1) + 'k';
+  return String(Math.round(num));
+}
+function escapeHTML(str) {
+  return String(str || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function formatYMD(ts) {
+  try {
+    var opts = { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' };
+    var parts = new Intl.DateTimeFormat('zh-CN', opts).formatToParts(new Date(ts));
+    var y = '', m = '', d2 = '';
+    parts.forEach(function (p) { if (p.type === 'year') y = p.value; if (p.type === 'month') m = p.value; if (p.type === 'day') d2 = p.value; });
+    return y + '-' + m + '-' + d2;
+  } catch (e) {
+    var d = new Date(ts + 8 * 3600000);
+    return d.getUTCFullYear() + '-' + String(d.getUTCMonth() + 1).padStart(2,'0') + '-' + String(d.getUTCDate()).padStart(2,'0');
+  }
+}
+function makeId(prefix) { return (prefix || 'id') + '_' + Math.random().toString(36).slice(2, 8); }
+
+// ─── Dynamic Theme Helpers ────────────────────────────────────────────────────
+function getDoc() {
+  try { if (window.parent && window.parent.document) return window.parent.document; } catch (e) {}
+  return document;
+}
+function getWin() { return window.parent || window; }
+
+function updateDynamicThemeColors() {
+  try {
+    var p = getWin(), doc = getDoc();
+    var panel = doc.getElementById('ds-panel');
+    if (!panel) return;
+    var temp = doc.createElement('div');
+    temp.style.color = 'var(--SmartThemeBlurTintColor)';
+    doc.body.appendChild(temp);
+    var color = p.getComputedStyle(temp).color;
+    doc.body.removeChild(temp);
+    var opaqueColor = '#080d14';
+    var match = color.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
+    if (match) opaqueColor = 'rgb(' + match[1] + ', ' + match[2] + ', ' + match[3] + ')';
+    else if (color.startsWith('#')) opaqueColor = color;
+    panel.style.setProperty('--ds-bg-opaque', opaqueColor);
+    panel.style.setProperty('--ds-text-color', 'var(--SmartThemeBodyColor, #f3f4f6)');
+    panel.style.setProperty('--ds-border-color', 'var(--SmartThemeBorderColor, #374151)');
+    panel.style.setProperty('--ds-shadow-color', 'var(--SmartThemeShadowColor, rgba(0,0,0,0.5))');
+  } catch (e) { console.warn('[DS] updateDynamicThemeColors:', e); }
 }
 
-// ─── UI creation ──────────────────────────────────────────────────────────────
+function applyDisplayMode() {
+  var mode = state.settings.displayMode || 'wand-modal';
+  var doc = getDoc();
+  var panel = doc.getElementById('ds-panel');
+  if (panel) {
+    panel.classList.remove('ds-fullscreen','ds-qr-top','ds-qr-bottom','ds-qr-left','ds-qr-right');
+    if (mode === 'wand-fullscreen') panel.classList.add('ds-fullscreen');
+    else if (mode === 'qr-top')    panel.classList.add('ds-qr-top');
+    else if (mode === 'qr-bottom') panel.classList.add('ds-qr-bottom');
+    else if (mode === 'qr-left')   panel.classList.add('ds-qr-left');
+    else if (mode === 'qr-right')  panel.classList.add('ds-qr-right');
+  }
+  var wandBtn = doc.getElementById('ds_wand_container');
+  if (wandBtn) {
+    if (mode === 'wand-modal' || mode === 'wand-fullscreen') wandBtn.style.setProperty('display', 'flex', 'important');
+    else wandBtn.style.setProperty('display', 'none', 'important');
+  }
+  ensureWalletButton();
+}
+
+function ensureWalletButton() {
+  var mode = state.settings.displayMode || 'wand-modal';
+  if (mode.indexOf('qr-') !== 0) { removeWalletButton(); return; }
+  var doc = getDoc();
+  var btnContainer = doc.querySelector('#qr--bar .qr--buttons') || doc.getElementById('qr--bar');
+  if (!btnContainer) return;
+  var btn = doc.getElementById('ds-qr-wallet-btn');
+  if (btn) { if (!btnContainer.contains(btn)) btnContainer.appendChild(btn); return; }
+  btn = doc.createElement('div');
+  btn.id = 'ds-qr-wallet-btn';
+  btn.className = 'qr--button menu_button interactable';
+  btn.tabIndex = 0; btn.role = 'button'; btn.title = 'DeepSeek使用统计';
+  btn.innerHTML = '<i class="fa-solid fa-wallet"></i>';
+  btn.style.setProperty('display', 'inline-flex', 'important');
+  btn.style.alignItems = 'center'; btn.style.justifyContent = 'center';
+  btn.style.color = 'var(--SmartThemeBodyColor, #f3f4f6)';
+  btn.style.transition = 'background-color 0.2s, transform 0.1s';
+  btn.addEventListener('mouseenter', function () { btn.style.background = 'rgba(255,255,255,0.15)'; btn.style.transform = 'scale(1.05)'; });
+  btn.addEventListener('mouseleave', function () { btn.style.background = 'transparent'; btn.style.transform = 'scale(1)'; });
+  btn.addEventListener('click', function (e) { e.preventDefault(); e.stopPropagation(); togglePanel(); });
+  btnContainer.appendChild(btn);
+}
+function removeWalletButton() { var btn = getDoc().getElementById('ds-qr-wallet-btn'); if (btn) btn.remove(); }
+function initWalletButtonObserver() {
+  try {
+    var doc = getDoc(), win = getWin();
+    var MObs = win.MutationObserver || win.parent?.MutationObserver || window.MutationObserver;
+    if (!MObs) return;
+    if (walletBtnObserver) walletBtnObserver.disconnect();
+    walletBtnObserver = new MObs(function () { if ((state.settings.displayMode || '').indexOf('qr-') === 0) ensureWalletButton(); });
+    walletBtnObserver.observe(doc.body, { childList: true, subtree: true });
+  } catch (e) { console.warn('[DS] initWalletButtonObserver:', e); }
+}
+
+// ─── Events + Fetch ───────────────────────────────────────────────────────────
+function setupEvents() {
+  eventSource.on(event_types.MESSAGE_RECEIVED, function () { setTimeout(refreshUI, 500); });
+  eventSource.on(event_types.CHAT_CHANGED, function () { setTimeout(handleChatChanged, 500); });
+}
+
+function patchFetch() {
+  var p = window.parent || window;
+  if (p._ds_fetch_patched) return;
+  var rawFetch = p.fetch;
+  p.fetch = function () {
+    var args = arguments;
+    var url = typeof args[0] === 'string' ? args[0] : (args[0] && args[0].url);
+    if (url && url.indexOf(TARGET_API) !== -1) {
+      var capturedMessages = null;
+      try {
+        if (args[1] && typeof args[1].body === 'string') {
+          var req = JSON.parse(args[1].body);
+          if (req && Array.isArray(req.messages)) {
+            capturedMessages = req.messages.map(function (m) {
+              var t = m.content || m.text || '';
+              return { role: m.role || 'unknown', text: t, length: t.length, hash: createTextHash(t) };
+            });
+          }
+        }
+      } catch (e) {}
+
+      if (state.settings.debug) {
+        var fakeUsage = {
+          prompt_cache_hit_tokens:  state.settings.debugHit,
+          prompt_cache_miss_tokens: state.settings.debugMiss,
+          completion_tokens:        state.settings.debugOutput,
+          total_tokens: state.settings.debugHit + state.settings.debugMiss + state.settings.debugOutput,
+        };
+        setTimeout(function () { processUsage(fakeUsage, state.settings.debugModel, true, capturedMessages, 'debug-' + Date.now()); }, 100);
+        return rawFetch.apply(p, args);
+      }
+
+      return rawFetch.apply(p, args).then(function (res) {
+        var clone = res.clone();
+        clone.text().then(function (text) {
+          try {
+            var data = null, trimmed = text.trim(), resId = '';
+            if (trimmed.startsWith('{')) {
+              data = JSON.parse(trimmed);
+              if (data && data.id) resId = data.id;
+            } else {
+              text.split('\n').forEach(function (line) {
+                if (line.startsWith('data: ') && line !== 'data: [DONE]') {
+                  try { var chunk = JSON.parse(line.substring(6)); if (chunk.id) resId = chunk.id; if (chunk.usage) data = chunk; } catch (e) {}
+                }
+              });
+            }
+            if (data && data.usage) processUsage(data.usage, data.model || '', false, capturedMessages, resId);
+          } catch (e) {}
+        }).catch(function () {});
+        return res;
+      });
+    }
+    return rawFetch.apply(p, args);
+  };
+  p._ds_fetch_patched = true;
+}
+
+// ─── UI Creation ──────────────────────────────────────────────────────────────
 function createUI() {
   var p   = window.parent || window;
   var doc = p.document;
 
-  // Bug fix #15: always tear down existing elements to ensure event bindings
-  // are fresh (handles hot-reload / re-init scenarios correctly)
-  ['ds-overlay', 'ds-panel'].forEach(function (id) {
-    var el = doc.getElementById(id);
-    if (el) el.remove();
-  });
+  ['ds-overlay','ds-panel'].forEach(function (id) { var el = doc.getElementById(id); if (el) el.remove(); });
 
-  // Overlay
   var overlay = doc.createElement('div');
-  overlay.id  = 'ds-overlay';
-  overlay.addEventListener('click', function (e) {
-    if (e.target === overlay) togglePanel();
-  });
+  overlay.id = 'ds-overlay';
+  overlay.addEventListener('click', function (e) { if (e.target === overlay) togglePanel(); });
 
-  // Panel shell
   var panel = doc.createElement('div');
-  panel.id  = 'ds-panel';
+  panel.id = 'ds-panel';
 
   // Header
   var header = doc.createElement('div');
   header.className = 'ds-header';
-  
   var titleEl = doc.createElement('div');
   titleEl.className = 'ds-header-title';
   titleEl.innerHTML = '<i class="fa-solid fa-fish" style="font-size: 18px;"></i>';
   header.appendChild(titleEl);
-
   var actionsEl = doc.createElement('div');
-  actionsEl.style.display = 'flex';
-  actionsEl.style.alignItems = 'center';
-  actionsEl.style.gap = '8px';
-
-  // Settings Gear Icon
+  actionsEl.style.cssText = 'display:flex;align-items:center;gap:8px;';
   var settingsIcon = doc.createElement('div');
   settingsIcon.id = 'ds-header-settings-btn';
   settingsIcon.className = 'ds-header-icon';
-  settingsIcon.title = '界面入口设置';
+  settingsIcon.title = '设置';
   settingsIcon.innerHTML = '<i class="fa-solid fa-gear"></i>';
   actionsEl.appendChild(settingsIcon);
-
-  // Close Button
   var closeBtn = doc.createElement('div');
   closeBtn.className = 'ds-close-btn';
   closeBtn.textContent = '✕';
-  closeBtn.addEventListener('click', function (e) {
-    e.stopPropagation();
-    togglePanel();
-  });
+  closeBtn.addEventListener('click', function (e) { e.stopPropagation(); togglePanel(); });
   actionsEl.appendChild(closeBtn);
   header.appendChild(actionsEl);
 
-  // Dropdown Menu Container (absolute inside panel)
+  // Settings Dropdown
   var settingsDropdown = doc.createElement('div');
   settingsDropdown.id = 'ds-settings-dropdown';
   settingsDropdown.className = 'ds-settings-dropdown';
-  settingsDropdown.innerHTML = 
+  settingsDropdown.innerHTML =
     '<details class="ds-dropdown-section">' +
       '<summary>界面入口及展示</summary>' +
       '<div class="ds-dropdown-section-content">' +
-        '<label class="ds-settings-dropdown-item">' +
-          '<input type="radio" name="ds-display-mode" value="wand-modal">' +
-          '<span>魔法棒菜单 (当前形式)</span>' +
-        '</label>' +
-        '<label class="ds-settings-dropdown-item">' +
-          '<input type="radio" name="ds-display-mode" value="wand-fullscreen">' +
-          '<span>魔法棒菜单 (全屏)</span>' +
-        '</label>' +
-        '<label class="ds-settings-dropdown-item">' +
-          '<input type="radio" name="ds-display-mode" value="qr-bar">' +
-          '<span>QR 栏 (普通弹窗)</span>' +
-        '</label>' +
-        '<label class="ds-settings-dropdown-item">' +
-          '<input type="radio" name="ds-display-mode" value="qr-top">' +
-          '<span>QR 栏 (自上方滑出)</span>' +
-        '</label>' +
-        '<label class="ds-settings-dropdown-item">' +
-          '<input type="radio" name="ds-display-mode" value="qr-bottom">' +
-          '<span>QR 栏 (自下方滑出)</span>' +
-        '</label>' +
-        '<label class="ds-settings-dropdown-item">' +
-          '<input type="radio" name="ds-display-mode" value="qr-left">' +
-          '<span>QR 栏 (自左侧滑出)</span>' +
-        '</label>' +
-        '<label class="ds-settings-dropdown-item">' +
-          '<input type="radio" name="ds-display-mode" value="qr-right">' +
-          '<span>QR 栏 (自右侧滑出)</span>' +
-        '</label>' +
+        ['wand-modal:魔法棒菜单 (当前形式)','wand-fullscreen:魔法棒菜单 (全屏)','qr-bar:QR 栏 (普通弹窗)',
+         'qr-top:QR 栏 (自上方滑出)','qr-bottom:QR 栏 (自下方滑出)','qr-left:QR 栏 (自左侧滑出)','qr-right:QR 栏 (自右侧滑出)']
+        .map(function (s) { var p2 = s.split(':'); return '<label class="ds-settings-dropdown-item"><input type="radio" name="ds-display-mode" value="' + p2[0] + '"><span>' + p2[1] + '</span></label>'; }).join('') +
       '</div>' +
     '</details>' +
     '<details class="ds-dropdown-section">' +
       '<summary>模块排序与显示</summary>' +
-      '<div class="ds-dropdown-section-content">' +
-        '<div id="ds-module-order-list" style="display:flex;flex-direction:column;gap:6px;margin-bottom:6px;"></div>' +
-      '</div>' +
+      '<div class="ds-dropdown-section-content"><div id="ds-module-order-list" style="display:flex;flex-direction:column;gap:6px;margin-bottom:6px;"></div></div>' +
     '</details>' +
     '<details class="ds-dropdown-section">' +
       '<summary>统计卡片定制</summary>' +
-      '<div class="ds-dropdown-section-content">' +
-        '<div id="ds-stats-custom-list" style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:6px;"></div>' +
-      '</div>' +
+      '<div class="ds-dropdown-section-content"><div id="ds-stats-custom-list" style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:6px;"></div></div>' +
+    '</details>' +
+    '<details class="ds-dropdown-section" id="ds-channel-manager-section">' +
+      '<summary>渠道管理</summary>' +
+      '<div class="ds-dropdown-section-content"><div id="ds-channel-manager"></div></div>' +
     '</details>' +
     '<details class="ds-dropdown-section">' +
-      '<summary>API密钥与余额</summary>' +
-      '<div class="ds-dropdown-section-content">' +
-        '<div class="ds-margin-b-8">' +
-          '<div style="font-size:10px;color:var(--SmartThemeEmColor);margin-bottom:4px">API密钥</div>' +
-          '<div class="ds-flex-row">' +
-            '<input id="ds-api-key" type="password" placeholder="API密钥" class="ds-input" style="height:28px;padding:4px 8px;font-size:12px;width:0;min-width:0;flex:1;">' +
-            '<button id="ds-btn-save-key" class="ds-btn ds-btn-sm ds-btn-normal" style="padding:2px 8px;">保存</button>' +
-          '</div>' +
-        '</div>' +
-        '<div class="ds-margin-b-8">' +
-          '<div class="ds-flex-between">' +
-            '<span class="ds-switch-label" style="font-size:12px">自动校准余额</span>' +
-            '<label class="ds-switch">' +
-              '<input type="checkbox" id="ds-auto-balance">' +
-              '<span class="ds-switch-slider"></span>' +
-            '</label>' +
-          '</div>' +
-          '<div id="ds-auto-balance-interval" style="display:none;margin-top:6px;">' +
-            '<div class="ds-flex-between">' +
-              '<span class="ds-switch-label" style="font-size:11px;color:var(--SmartThemeEmColor)">校准间隔</span>' +
-              '<div style="display:flex;align-items:center;gap:4px">' +
-                '<input type="number" id="ds-balance-interval" min="1" max="100" value="10" ' +
-                       'class="ds-input-compact" style="width:50px;text-align:center;height:22px;padding:2px 4px;">' +
-                '<span style="font-size:11px;color:var(--SmartThemeEmColor)">条消息</span>' +
-              '</div>' +
-            '</div>' +
-          '</div>' +
-        '</div>' +
-        '<div class="ds-margin-b-8">' +
-          '<div style="font-size:10px;color:var(--SmartThemeEmColor);margin-bottom:4px">自定义余额</div>' +
-          '<div class="ds-flex-row">' +
-            '<input id="ds-custom-balance" type="number" step="0.01" placeholder="余额金额" class="ds-input" style="height:28px;padding:4px 8px;font-size:12px;width:0;min-width:0;flex:1;">' +
-            '<button id="ds-btn-save-balance" class="ds-btn ds-btn-sm ds-btn-success" style="padding:2px 8px;">保存</button>' +
-            '<button id="ds-btn-clear-balance" class="ds-btn ds-btn-sm ds-btn-danger" style="padding:2px 8px;">清除</button>' +
-          '</div>' +
-          '<div id="ds-custom-balance-status" style="font-size:10px;color:var(--SmartThemeEmColor);margin-top:2px"></div>' +
-        '</div>' +
-      '</div>' +
-    '</details>' +
-    '<details class="ds-dropdown-section">' +
-      '<summary>价格机制</summary>' +
-      '<div class="ds-dropdown-section-content">' +
-        '<div class="ds-flex-between ds-margin-b-8">' +
-          '<span class="ds-switch-label" style="font-size:12px">新价格机制 (峰谷定价)</span>' +
-          '<label class="ds-switch">' +
-            '<input type="checkbox" id="ds-use-new-pricing">' +
-            '<span class="ds-switch-slider"></span>' +
-          '</label>' +
-        '</div>' +
-        '<div id="ds-new-pricing-panel" style="display:none;margin-top:6px;">' +
-          '<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">' +
-            '<span style="font-size:11px;color:var(--SmartThemeEmColor);white-space:nowrap">生效日期</span>' +
-            '<input type="date" id="ds-new-pricing-date" class="ds-input-compact" style="flex:1;height:22px;padding:2px 4px;font-size:11px;">' +
-            '<button id="ds-btn-pricing-today" class="ds-btn ds-btn-sm ds-btn-normal" style="padding:2px 6px;">今天</button>' +
-          '</div>' +
-          '<div style="font-size:10px;color:var(--SmartThemeEmColor);line-height:1.4">' +
-            '<div>高峰：每日 9:00~12:00, 14:00~18:00 (北京时间)</div>' +
-            '<div style="margin-top:2px">生效日前的历史请求仍使用旧价格。</div>' +
-          '</div>' +
-        '</div>' +
-      '</div>' +
-    '</details>' +
-    '<details class="ds-dropdown-section" open>' +
       '<summary>调试模式</summary>' +
       '<div class="ds-dropdown-section-content">' +
-        '<div class="ds-flex-between ds-margin-b-8">' +
-          '<span class="ds-switch-label" style="font-size:12px">开启调试</span>' +
-          '<label class="ds-switch">' +
-            '<input type="checkbox" id="ds-debug-mode">' +
-            '<span class="ds-switch-slider"></span>' +
-          '</label>' +
-        '</div>' +
+        '<div class="ds-flex-between ds-margin-b-8"><span class="ds-switch-label" style="font-size:12px">开启调试</span>' +
+        '<label class="ds-switch"><input type="checkbox" id="ds-debug-mode"><span class="ds-switch-slider"></span></label></div>' +
         '<div id="ds-debug-panel" style="display:none;margin-top:6px;">' +
           '<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;margin-bottom:4px">' +
-            '<div>' +
-              '<div style="font-size:9px;color:var(--SmartThemeEmColor);margin-bottom:2px">命中 tokens</div>' +
-              '<input id="ds-debug-hit" type="number" min="0" value="10000" class="ds-input-compact" style="height:22px;padding:2px 4px;font-size:11px;">' +
-            '</div>' +
-            '<div>' +
-              '<div style="font-size:9px;color:var(--SmartThemeEmColor);margin-bottom:2px">未命中 tokens</div>' +
-              '<input id="ds-debug-miss" type="number" min="0" value="5000" class="ds-input-compact" style="height:22px;padding:2px 4px;font-size:11px;">' +
-            '</div>' +
-            '<div>' +
-              '<div style="font-size:9px;color:var(--SmartThemeEmColor);margin-bottom:2px">输出 tokens</div>' +
-              '<input id="ds-debug-output" type="number" min="0" value="2000" class="ds-input-compact" style="height:22px;padding:2px 4px;font-size:11px;">' +
-            '</div>' +
-            '<div>' +
-              '<div style="font-size:9px;color:var(--SmartThemeEmColor);margin-bottom:2px">模型</div>' +
-              '<select id="ds-debug-model" class="ds-input-compact" style="height:22px;padding:2px 4px;font-size:11px;">' +
-                '<option value="deepseek-v4-flash">deepseek-v4-flash</option>' +
-                '<option value="deepseek-v4-pro">deepseek-v4-pro</option>' +
-                '<option value="deepseek-chat">deepseek-chat</option>' +
-                '<option value="deepseek-reasoner">deepseek-reasoner</option>' +
-              '</select>' +
-            '</div>' +
+            '<div><div style="font-size:9px;color:var(--SmartThemeEmColor);margin-bottom:2px">命中 tokens</div>' +
+            '<input id="ds-debug-hit" type="number" min="0" value="10000" class="ds-input-compact" style="height:22px;padding:2px 4px;font-size:11px;"></div>' +
+            '<div><div style="font-size:9px;color:var(--SmartThemeEmColor);margin-bottom:2px">未命中 tokens</div>' +
+            '<input id="ds-debug-miss" type="number" min="0" value="5000" class="ds-input-compact" style="height:22px;padding:2px 4px;font-size:11px;"></div>' +
+            '<div><div style="font-size:9px;color:var(--SmartThemeEmColor);margin-bottom:2px">输出 tokens</div>' +
+            '<input id="ds-debug-output" type="number" min="0" value="2000" class="ds-input-compact" style="height:22px;padding:2px 4px;font-size:11px;"></div>' +
+            '<div><div style="font-size:9px;color:var(--SmartThemeEmColor);margin-bottom:2px">模型</div>' +
+            '<input id="ds-debug-model" type="text" value="deepseek-v4-flash" class="ds-input-compact" style="height:22px;padding:2px 4px;font-size:11px;" placeholder="模型名"></div>' +
           '</div>' +
           '<div id="ds-debug-status" style="font-size:10px;color:var(--SmartThemeQuoteColor)"></div>' +
         '</div>' +
       '</div>' +
     '</details>' +
-    '<div class="ds-settings-dropdown-divider" style="margin: 8px 0; border-top: 1px solid var(--SmartThemeBorderColor, #374151);"></div>' +
-    '<button id="ds-btn-show-help" class="ds-btn ds-btn-sm ds-btn-normal" style="width: 100%; display: flex; align-items: center; justify-content: center; gap: 6px;">' +
-      '<i class="fa-solid fa-circle-question"></i> 使用说明 & 版本' +
+    '<div style="margin:8px 0;border-top:1px solid var(--SmartThemeBorderColor,#374151);"></div>' +
+    '<button id="ds-btn-show-help" class="ds-btn ds-btn-sm ds-btn-normal" style="width:100%;display:flex;align-items:center;justify-content:center;gap:6px;">' +
+      '<i class="fa-solid fa-circle-question"></i> 使用说明 &amp; 版本' +
     '</button>';
 
   // Content
   var content = doc.createElement('div');
-  content.id        = 'ds-content';
-  content.className = 'ds-content';
+  content.id = 'ds-content'; content.className = 'ds-content';
   content.innerHTML = PANEL_HTML;
 
-  // Help Modal Container
+  // Help Modal
   var helpModal = doc.createElement('div');
-  helpModal.id = 'ds-help-modal';
-  helpModal.className = 'ds-help-modal';
-  helpModal.innerHTML = 
+  helpModal.id = 'ds-help-modal'; helpModal.className = 'ds-help-modal';
+  helpModal.innerHTML =
     '<div class="ds-help-modal-header">' +
-      '<div class="ds-help-modal-title">' +
-        '<i class="fa-solid fa-circle-question"></i> 使用说明 & 关于' +
-      '</div>' +
+      '<div class="ds-help-modal-title"><i class="fa-solid fa-circle-question"></i> 使用说明 &amp; 关于</div>' +
       '<div id="ds-help-modal-close" class="ds-close-btn">✕</div>' +
     '</div>' +
     '<div class="ds-help-modal-body">' +
-      '<div class="ds-help-modal-version">版本：release1.61</div>' +
-      '<div class="ds-help-block">' +
-        '<div class="ds-help-label-red">⚠️ 安全提示</div>' +
-        '<div>在本插件中填入 API 密钥存在安全风险。密钥存储在浏览器 localStorage 中，建议使用权限受限的 API 密钥。</div>' +
-      '</div>' +
-      '<div class="ds-help-block">' +
-        '<div class="ds-help-label-blue">ℹ️ 使用方法</div>' +
-        '<div class="ds-help-modal-list">' +
-          '<div>1. 输入 API 密钥并保存</div>' +
-          '<div>2. 点击“查询”获取余额</div>' +
-          '<div>3. 正常进行聊天对话，插件将自动统计数据</div>' +
-          '<div>4. 可新建、切换或删除具体聊天存档</div>' +
-          '<div>5. 选择“全部存档”可查看全局合并统计</div>' +
-        '</div>' +
-      '</div>' +
-      '<div class="ds-help-block">' +
-        '<div class="ds-help-label-purple">✨ 关于</div>' +
-        '<div>本插件由 AI 编写、优化及修复，版本 release1.61</div>' +
-      '</div>' +
+      '<div class="ds-help-modal-version">版本：release1.62</div>' +
+      '<div class="ds-help-block"><div class="ds-help-label-red">⚠️ 安全提示</div><div>在本插件中填入 API 密钥存在安全风险，建议使用权限受限的密钥。</div></div>' +
+      '<div class="ds-help-block"><div class="ds-help-label-blue">ℹ️ 渠道说明</div><div class="ds-help-modal-list">' +
+        '<div>1. 在"渠道管理"中配置各渠道的 API 密钥、余额和定价规则</div>' +
+        '<div>2. 系统通过模型名关键字自动匹配渠道（如 deepseek-ai/ 匹配硅基流动）</div>' +
+        '<div>3. 无定价规则的模型显示为"外部渠道"，费用记为0，不扣减余额</div>' +
+        '<div>4. 统计页支持按模型过滤（含多模型时显示过滤器）</div>' +
+      '</div></div>' +
+      '<div class="ds-help-block"><div class="ds-help-label-purple">✨ 关于</div><div>本插件由 AI 编写、优化及修复，版本 release1.62</div></div>' +
     '</div>';
 
   panel.appendChild(header);
@@ -2055,335 +1442,104 @@ function createUI() {
   doc.body.appendChild(overlay);
   doc.body.appendChild(panel);
 
-  // Bind controls after DOM is in place
-  // Bug fix #14: all declarations are contained in a single block scope via let
-  // (emulated here via a self-contained function to avoid var hoisting confusion)
-  setTimeout(function () {
-    bindUIControls(doc);
-  }, 100);
+  setTimeout(function () { bindUIControls(doc); }, 100);
 }
 
+// ─── Bind UI Controls ─────────────────────────────────────────────────────────
 function bindUIControls(doc) {
-  // Helper
   function el(id) { return doc.getElementById(id); }
 
-  // ── Restore persisted values into inputs ──────────────────────────────────
-  var apiKeyInput = el('ds-api-key');
-  if (apiKeyInput && state.apiKey) apiKeyInput.value = state.apiKey;
-
-  var customBalanceInput = el('ds-custom-balance');
-  if (state.customBalance !== null && state.customBalance !== '') {
-    var beEl = el('ds-balance');
-    var seEl = el('ds-balance-status');
-    if (beEl) beEl.textContent = '¥' + parseFloat(state.customBalance).toFixed(2) + ' CNY';
-    if (seEl) seEl.textContent = '自定义余额';
-    if (customBalanceInput) customBalanceInput.value = state.customBalance;
-    var cbStatusEl = el('ds-custom-balance-status');
-    if (cbStatusEl) cbStatusEl.textContent = '已设置';
-  } else if (state.balance) {
-    var beEl2 = el('ds-balance');
-    var seEl2 = el('ds-balance-status');
-    if (beEl2) beEl2.textContent = '¥' + state.balance.balance + ' ' + state.balance.currency;
-    if (seEl2) seEl2.textContent = '账户可用';
-  }
-
-  // ── Save management buttons ───────────────────────────────────────────────
+  // Save management
   var btnNewSave = el('ds-btn-new-save');
-  if (btnNewSave) {
-    btnNewSave.onclick = function () {
-      createNewSave();
-      refreshUI();
-    };
-  }
+  if (btnNewSave) btnNewSave.onclick = function () { createNewSave(); refreshUI(); };
 
   var btnDeleteSave = el('ds-btn-delete-save');
-  if (btnDeleteSave) {
-    btnDeleteSave.onclick = async function () {
-      // Prevent deletion when viewing __all__
-      if (state.currentSave === '__all__') {
-        alert('请先选择具体存档后再删除');
-        return;
-      }
-      if (confirm('确定删除当前存档？')) {
-        await deleteSave(state.currentSave);
-        refreshUI();
-      }
-    };
-  }
+  if (btnDeleteSave) btnDeleteSave.onclick = async function () {
+    if (state.currentSave === '__all__') { alert('请先选择具体存档后再删除'); return; }
+    if (confirm('确定删除当前存档？')) { await deleteSave(state.currentSave); refreshUI(); }
+  };
 
   var btnDeleteAll = el('ds-btn-delete-all');
-  if (btnDeleteAll) {
-    btnDeleteAll.onclick = async function () {
-      if (confirm('确定清空全部存档？此操作不可恢复！')) {
-        state.saves = {};
-        saveSaves();
-        createNewSave();
-        await saveCurrentSaveKey();
-        refreshUI();
-      }
-    };
-  }
+  if (btnDeleteAll) btnDeleteAll.onclick = async function () {
+    if (confirm('确定清空全部存档？此操作不可恢复！')) {
+      state.saves = {}; saveSaves(); createNewSave();
+      await saveCurrentSaveKey(); refreshUI();
+    }
+  };
 
   var btnRefresh = el('ds-btn-refresh');
-  if (btnRefresh) {
-    btnRefresh.onclick = function () { refreshUI(); };
-  }
+  if (btnRefresh) btnRefresh.onclick = function () { refreshUI(); };
 
   var btnClear = el('ds-btn-clear');
-  if (btnClear) {
-    btnClear.onclick = function () {
-      // Bug fix #4: disallow clear when __all__ is selected (no real save to clear)
-      if (state.currentSave === '__all__') {
-        alert('请先选择具体存档后再清空');
-        return;
-      }
-      var s = state.saves[state.currentSave];
-      if (!s) return;
-      s.total_tokens      = 0;
-      s.total_cost        = 0;
-      s.input_tokens      = 0;
-      s.output_tokens     = 0;
-      s.cache_hit_tokens  = 0;
-      s.cache_miss_tokens = 0;
-      s.input_cost        = 0;
-      s.output_cost       = 0;
-      s.rounds            = 0;
-      s.history           = [];
-      saveSaves();
-      refreshUI();
-    };
-  }
+  if (btnClear) btnClear.onclick = function () {
+    if (state.currentSave === '__all__') { alert('请先选择具体存档后再清空'); return; }
+    var s = state.saves[state.currentSave]; if (!s) return;
+    s.total_tokens = s.total_cost = s.input_tokens = s.output_tokens = 0;
+    s.cache_hit_tokens = s.cache_miss_tokens = s.input_cost = s.output_cost = s.rounds = 0;
+    s.history = []; saveSaves(); refreshUI();
+  };
 
-  // ── API key ───────────────────────────────────────────────────────────────
-  var btnSaveKey = el('ds-btn-save-key');
-  if (btnSaveKey) {
-    btnSaveKey.onclick = async function () {
-      var key = apiKeyInput ? apiKeyInput.value.trim() : '';
-      await saveApiKey(key);
-      var statusEl = el('ds-balance-status');
-      if (statusEl) statusEl.textContent = key ? '密钥已保存' : '密钥已清空';
-    };
-  }
+  // Balance layout toggle
+  var btnBalLayout = el('ds-btn-balance-layout');
+  if (btnBalLayout) btnBalLayout.onclick = function () {
+    state.settings.balanceLayout = state.settings.balanceLayout === 'vertical' ? 'horizontal' : 'vertical';
+    saveSettings(); refreshUI();
+  };
 
-  var btnQueryBal = el('ds-btn-query-balance');
-  if (btnQueryBal) {
-    btnQueryBal.onclick = function () { queryBalance(); };
-  }
-
-
-
-  // ── Auto-balance toggle ───────────────────────────────────────────────────
-  var autoBalChk      = el('ds-auto-balance');
-  var autoBalInterval = el('ds-auto-balance-interval');
-  var balIntervalInp  = el('ds-balance-interval');
-  if (autoBalChk) {
-    autoBalChk.checked = state.settings.autoBalance;
-    if (autoBalInterval) autoBalInterval.style.display = state.settings.autoBalance ? 'block' : 'none';
-    if (balIntervalInp)  balIntervalInp.value = state.settings.balanceInterval;
-
-    autoBalChk.onchange = function () {
-      state.settings.autoBalance = this.checked;
-      if (autoBalInterval) autoBalInterval.style.display = this.checked ? 'block' : 'none';
-      saveSettings();
-    };
-  }
-  if (balIntervalInp) {
-    balIntervalInp.onchange = function () {
-      state.settings.balanceInterval = parseInt(this.value, 10) || 10;
-      saveSettings();
-    };
-  }
-
-  // ── Custom balance ────────────────────────────────────────────────────────
-  var btnSaveBal  = el('ds-btn-save-balance');
-  var btnClearBal = el('ds-btn-clear-balance');
-  var cbStatus    = el('ds-custom-balance-status');
-
-  if (btnSaveBal) {
-    btnSaveBal.onclick = async function () {
-      var val = customBalanceInput ? customBalanceInput.value.trim() : '';
-      if (val === '' || isNaN(parseFloat(val))) {
-        if (cbStatus) { cbStatus.textContent = '请输入有效金额'; cbStatus.style.color = '#f87171'; }
-        return;
-      }
-      state.customBalance = val;
-      await saveDataAsync(CUSTOM_BALANCE_STORAGE, val);
-      if (cbStatus) { cbStatus.textContent = '已保存'; cbStatus.style.color = '#34d399'; }
-      var beEl3 = el('ds-balance');
-      var seEl3 = el('ds-balance-status');
-      if (beEl3) beEl3.textContent = '¥' + parseFloat(val).toFixed(2) + ' CNY';
-      if (seEl3) seEl3.textContent = '自定义余额';
-      refreshUI();
-    };
-  }
-
-  if (btnClearBal) {
-    btnClearBal.onclick = async function () {
-      state.customBalance = null;
-      await saveDataAsync(CUSTOM_BALANCE_STORAGE, '');
-      if (customBalanceInput) customBalanceInput.value = '';
-      if (cbStatus) { cbStatus.textContent = '已清除，恢复使用API余额'; cbStatus.style.color = '#9ca3af'; }
-      var beEl4 = el('ds-balance');
-      var seEl4 = el('ds-balance-status');
-      if (state.balance) {
-        if (beEl4) beEl4.textContent = '¥' + state.balance.balance + ' ' + state.balance.currency;
-        if (seEl4) seEl4.textContent = '账户可用';
-      } else {
-        if (beEl4) beEl4.textContent = '¥0.00 CNY';
-        if (seEl4) seEl4.textContent = '';
-      }
-      refreshUI();
-    };
-  }
-
-  // ── Pricing mechanism ──────────────────────────────────────────────────────
-  var useNewPricingChk  = el('ds-use-new-pricing');
-  var newPricingPanel   = el('ds-new-pricing-panel');
-  var newPricingDateInp = el('ds-new-pricing-date');
-  var btnPricingToday   = el('ds-btn-pricing-today');
-
-  function formatYMD(ts) {
-    try {
-      var options = { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' };
-      var formatter = new Intl.DateTimeFormat('zh-CN', options);
-      var parts = formatter.formatToParts(new Date(ts));
-      var y = '', m = '', d = '';
-      parts.forEach(function (p) {
-        if (p.type === 'year') y = p.value;
-        if (p.type === 'month') m = p.value;
-        if (p.type === 'day') d = p.value;
-      });
-      return y + '-' + m + '-' + d;
-    } catch (e) {
-      var d = new Date(ts + 8 * 3600000);
-      var y = d.getUTCFullYear();
-      var m = String(d.getUTCMonth() + 1).padStart(2, '0');
-      var date = String(d.getUTCDate()).padStart(2, '0');
-      return y + '-' + m + '-' + date;
-    }
-  }
-
-  if (useNewPricingChk) {
-    useNewPricingChk.checked = state.settings.useNewPricing || false;
-    if (newPricingPanel) {
-      newPricingPanel.style.display = (state.settings.useNewPricing) ? 'block' : 'none';
-    }
-    if (newPricingDateInp && state.settings.newPricingDate) {
-      newPricingDateInp.value = formatYMD(state.settings.newPricingDate);
-    }
-
-    useNewPricingChk.onchange = async function () {
-      state.settings.useNewPricing = this.checked;
-      if (newPricingPanel) {
-        newPricingPanel.style.display = this.checked ? 'block' : 'none';
-      }
-      await saveSettings();
-    };
-  }
-
-  if (newPricingDateInp) {
-    newPricingDateInp.onchange = async function () {
-      var val = this.value;
-      if (val) {
-        var d = new Date(val + 'T00:00:00+08:00');
-        state.settings.newPricingDate = d.getTime();
-        await saveSettings();
-      }
-    };
-  }
-
-  if (btnPricingToday) {
-    btnPricingToday.onclick = async function () {
-      var todayStr = formatYMD(Date.now());
-      if (newPricingDateInp) {
-        newPricingDateInp.value = todayStr;
-      }
-      var d = new Date(todayStr + 'T00:00:00+08:00');
-      state.settings.newPricingDate = d.getTime();
-      await saveSettings();
-    };
-  }
-
-  // ── Debug mode ────────────────────────────────────────────────────────────
-  var debugToggle = el('ds-debug-mode');
-  var debugPanel  = el('ds-debug-panel');
-  var debugHitEl  = el('ds-debug-hit');
-  var debugMissEl = el('ds-debug-miss');
-  var debugOutEl  = el('ds-debug-output');
-  var debugMdlEl  = el('ds-debug-model');
-  var debugStatus = el('ds-debug-status');
-
-  if (debugToggle) {
-    debugToggle.checked = state.settings.debug;
-    if (debugPanel)  debugPanel.style.display  = state.settings.debug ? 'block' : 'none';
-    if (debugHitEl)  debugHitEl.value  = state.settings.debugHit;
-    if (debugMissEl) debugMissEl.value = state.settings.debugMiss;
-    if (debugOutEl)  debugOutEl.value  = state.settings.debugOutput;
-    if (debugMdlEl)  debugMdlEl.value  = state.settings.debugModel;
-    if (debugStatus) debugStatus.textContent = state.settings.debug
-      ? '调试模式已开启，下次对话将使用模拟参数，不会产生API费用' : '';
-
-    debugToggle.onchange = function () {
-      state.settings.debug = this.checked;
-      if (debugPanel) debugPanel.style.display = this.checked ? 'block' : 'none';
-      if (debugStatus) debugStatus.textContent = this.checked
-        ? '调试模式已开启，下次对话将使用模拟参数，不会产生API费用' : '';
-      saveSettings();
-    };
-  }
-  if (debugHitEl) {
-    debugHitEl.onchange = function () {
-      state.settings.debugHit = parseInt(this.value, 10) || 0;
-      saveSettings();
-    };
-  }
-  if (debugMissEl) {
-    debugMissEl.onchange = function () {
-      state.settings.debugMiss = parseInt(this.value, 10) || 0;
-      saveSettings();
-    };
-  }
-  if (debugOutEl) {
-    debugOutEl.onchange = function () {
-      state.settings.debugOutput = parseInt(this.value, 10) || 0;
-      saveSettings();
-    };
-  }
-  if (debugMdlEl) {
-    debugMdlEl.onchange = function () {
-      state.settings.debugModel = this.value;
-      saveSettings();
-    };
-  }
-
-  // ── Save selector ─────────────────────────────────────────────────────────
+  // Save selector
   var saveSelect = el('ds-save-select');
   if (saveSelect) {
     saveSelect.onchange = async function (e) {
       state.currentSave = e.target.value;
-      if (state.currentSave !== '__all__') {
-        state.lastRealSave = state.currentSave;
-        await saveLastRealSaveKey();
-      }
-      await saveCurrentSaveKey();
-      refreshUI();
+      if (state.currentSave !== '__all__') { state.lastRealSave = state.currentSave; await saveLastRealSaveKey(); }
+      state.activeModelFilter = '__all__';
+      await saveCurrentSaveKey(); refreshUI();
     };
   }
 
-  // ── Header settings gear dropdown ─────────────────────────────────────────
-  var settingsBtn = el('ds-header-settings-btn');
+  // Debug mode
+  var debugToggle = el('ds-debug-mode');
+  var debugPanel  = el('ds-debug-panel');
+  var debugStatus = el('ds-debug-status');
+  if (debugToggle) {
+    debugToggle.checked = state.settings.debug;
+    if (debugPanel) debugPanel.style.display = state.settings.debug ? 'block' : 'none';
+    if (debugStatus) debugStatus.textContent = state.settings.debug ? '调试模式已开启，下次对话将使用模拟参数' : '';
+    debugToggle.onchange = function () {
+      state.settings.debug = this.checked;
+      if (debugPanel) debugPanel.style.display = this.checked ? 'block' : 'none';
+      if (debugStatus) debugStatus.textContent = this.checked ? '调试模式已开启，下次对话将使用模拟参数' : '';
+      saveSettings();
+    };
+  }
+  ['hit','miss','output'].forEach(function (t) {
+    var inp = el('ds-debug-' + t);
+    if (inp) {
+      inp.value = state.settings['debug' + t.charAt(0).toUpperCase() + t.slice(1)];
+      inp.onchange = function () { state.settings['debug' + t.charAt(0).toUpperCase() + t.slice(1)] = parseInt(this.value, 10) || 0; saveSettings(); };
+    }
+  });
+  var debugModelInp = el('ds-debug-model');
+  if (debugModelInp) {
+    debugModelInp.value = state.settings.debugModel;
+    debugModelInp.onchange = function () { state.settings.debugModel = this.value.trim(); saveSettings(); };
+  }
+
+  // Header settings dropdown toggle
+  var settingsBtn  = el('ds-header-settings-btn');
   var settingsDrop = el('ds-settings-dropdown');
   if (settingsBtn && settingsDrop) {
     settingsBtn.onclick = function (e) {
       e.stopPropagation();
       var isOpen = settingsDrop.style.display === 'block';
       settingsDrop.style.display = isOpen ? 'none' : 'block';
+      if (!isOpen) renderChannelManager(doc);
     };
   }
 
-  // Show help modal from settings dropdown
+  // Help modal
   var btnShowHelp = el('ds-btn-show-help');
-  var helpModal = el('ds-help-modal');
+  var helpModal   = el('ds-help-modal');
   if (btnShowHelp && helpModal) {
     btnShowHelp.onclick = function (e) {
       e.stopPropagation();
@@ -2391,43 +1547,66 @@ function bindUIControls(doc) {
       helpModal.style.display = 'flex';
     };
   }
-
-  // Close help modal
   var btnCloseHelp = el('ds-help-modal-close');
   if (btnCloseHelp && helpModal) {
-    btnCloseHelp.onclick = function (e) {
-      e.stopPropagation();
-      helpModal.style.display = 'none';
-    };
+    btnCloseHelp.onclick = function (e) { e.stopPropagation(); helpModal.style.display = 'none'; };
   }
 
-  // Close dropdown on click outside — track listener to avoid duplicates on re-init
-  if (_docClickListener) {
-    doc.removeEventListener('click', _docClickListener);
-  }
+  // Close dropdown on outside click
+  if (_docClickListener) doc.removeEventListener('click', _docClickListener);
   _docClickListener = function (e) {
     var drop = el('ds-settings-dropdown');
-    var btn = el('ds-header-settings-btn');
-    if (drop && btn && !drop.contains(e.target) && !btn.contains(e.target)) {
-      drop.style.display = 'none';
-    }
+    var btn  = el('ds-header-settings-btn');
+    if (drop && btn && !drop.contains(e.target) && !btn.contains(e.target)) drop.style.display = 'none';
   };
   doc.addEventListener('click', _docClickListener);
 
-  // Display mode change binding
-  var displayModeRadios = doc.querySelectorAll('input[name="ds-display-mode"]');
-  displayModeRadios.forEach(function (radio) {
-    if (radio.value === state.settings.displayMode) {
-      radio.checked = true;
-    }
-    radio.onchange = async function () {
-      state.settings.displayMode = this.value;
-      await saveSettings();
-      applyDisplayMode();
-    };
+  // Display mode radios
+  var radios = doc.querySelectorAll('input[name="ds-display-mode"]');
+  radios.forEach(function (radio) {
+    if (radio.value === state.settings.displayMode) radio.checked = true;
+    radio.onchange = async function () { state.settings.displayMode = this.value; await saveSettings(); applyDisplayMode(); };
   });
 
-  // Call theme and mode initialization
+  // Panel diff/history delegation
+  var panel = doc.getElementById('ds-panel');
+  if (panel) {
+    panel.addEventListener('click', function (e) {
+      var beforeBtn = e.target.closest('.ds-diff-before-btn');
+      var afterBtn  = e.target.closest('.ds-diff-after-btn');
+      var fsBtn     = e.target.closest('#ds-btn-diff-fullscreen');
+      var toggleBtn = e.target.closest('#ds-history-toggle');
+
+      if (beforeBtn) {
+        var ts = parseInt(beforeBtn.getAttribute('data-timestamp'), 10);
+        selectedBeforeId = selectedBeforeId === ts ? null : ts;
+        refreshUI();
+      }
+      if (afterBtn) {
+        var ts2 = parseInt(afterBtn.getAttribute('data-timestamp'), 10);
+        selectedAfterId = selectedAfterId === ts2 ? null : ts2;
+        refreshUI();
+      }
+      if (fsBtn) {
+        var dm = doc.getElementById('ds-module-diff');
+        if (dm) {
+          var isFS = dm.classList.toggle('ds-diff-fullscreen');
+          fsBtn.innerHTML = isFS ? '<i class="fa-solid fa-compress"></i>' : '<i class="fa-solid fa-expand"></i>';
+        }
+      }
+      if (toggleBtn) {
+        var histEl = doc.getElementById('ds-history');
+        if (histEl) {
+          var expanded = histEl.getAttribute('data-expanded') === 'true';
+          var next = !expanded;
+          histEl.setAttribute('data-expanded', next ? 'true' : 'false');
+          if (next) { histEl.classList.remove('ds-folded'); toggleBtn.textContent = '收起历史记录'; }
+          else       { histEl.classList.add('ds-folded');    toggleBtn.textContent = '展开更多 (最多显示20条)...'; }
+        }
+      }
+    });
+  }
+
   applyDisplayMode();
   updateDynamicThemeColors();
   applyModuleOrder();
@@ -2436,129 +1615,550 @@ function bindUIControls(doc) {
   renderModuleOrderSettings(doc);
   renderStatsCustomizerSettings(doc);
 
-  // Bind click handlers for prompt diff buttons via event delegation on ds-panel
-  var panel = doc.getElementById('ds-panel');
-  if (panel) {
-    panel.addEventListener('click', function (e) {
-      var beforeBtn = e.target.closest('.ds-diff-before-btn');
-      var afterBtn = e.target.closest('.ds-diff-after-btn');
-      var fullscreenBtn = e.target.closest('#ds-btn-diff-fullscreen');
-
-      if (beforeBtn) {
-        var timestamp = parseInt(beforeBtn.getAttribute('data-timestamp'), 10);
-        if (selectedBeforeId === timestamp) {
-          selectedBeforeId = null; // Toggle off
-        } else {
-          selectedBeforeId = timestamp;
-        }
-        refreshUI();
-      }
-
-      if (afterBtn) {
-        var timestamp = parseInt(afterBtn.getAttribute('data-timestamp'), 10);
-        if (selectedAfterId === timestamp) {
-          selectedAfterId = null; // Toggle off
-        } else {
-          selectedAfterId = timestamp;
-        }
-        refreshUI();
-      }
-
-      if (fullscreenBtn) {
-        var diffModule = doc.getElementById('ds-module-diff');
-        if (diffModule) {
-          var isFS = diffModule.classList.toggle('ds-diff-fullscreen');
-          fullscreenBtn.innerHTML = isFS ? '<i class="fa-solid fa-compress"></i>' : '<i class="fa-solid fa-expand"></i>';
-        }
-      }
-
-      var toggleBtn = e.target.closest('#ds-history-toggle');
-      if (toggleBtn) {
-        var histEl = doc.getElementById('ds-history');
-        if (histEl) {
-          var isExpanded = histEl.getAttribute('data-expanded') === 'true';
-          var nextExpanded = !isExpanded;
-          histEl.setAttribute('data-expanded', nextExpanded ? 'true' : 'false');
-          if (nextExpanded) {
-            histEl.classList.remove('ds-folded');
-            toggleBtn.textContent = '收起历史记录';
-          } else {
-            histEl.classList.add('ds-folded');
-            toggleBtn.textContent = '展开更多 (最多显示20条)...';
-          }
-        }
-      }
-    });
-  }
-
   refreshSaveSelect();
   refreshUI();
 }
 
-// ─── Save selector refresh ────────────────────────────────────────────────────
+// ─── Channel Manager Rendering ────────────────────────────────────────────────
+var _editingRule = null; // { channelId, ruleId } or null
+
+function renderChannelManager(doc) {
+  var container = doc.getElementById('ds-channel-manager');
+  if (!container) return;
+
+  var channels = getChannels();
+
+  var html = '<div style="margin-bottom:8px;">' +
+    '<button id="ds-cm-add-channel" class="ds-btn ds-btn-sm ds-btn-normal" style="width:100%;display:flex;align-items:center;justify-content:center;gap:4px;">' +
+    '<i class="fa-solid fa-plus" style="font-size:10px;"></i> 新增渠道</button></div>';
+
+  channels.forEach(function (ch) {
+    html += renderChannelBlock(ch);
+  });
+
+  container.innerHTML = html;
+
+  // Bind add-channel button
+  var addChBtn = container.querySelector('#ds-cm-add-channel');
+  if (addChBtn) addChBtn.onclick = function () { showAddChannelInlineForm(doc); };
+
+  // Bind all channel controls
+  bindChannelManagerControls(doc, container);
+}
+
+function renderChannelBlock(ch) {
+  var color = escapeHTML(ch.color || '#6366f1');
+  var chId  = escapeHTML(ch.id);
+
+  var balText;
+  if (ch.customBalance !== null && ch.customBalance !== '') {
+    balText = '¥' + parseFloat(ch.customBalance).toFixed(2) + ' (自定义)';
+  } else if (ch.balance && ch.balance.balance != null) {
+    balText = '¥' + parseFloat(ch.balance.balance).toFixed(2) + ' ' + (ch.balance.currency || 'CNY');
+  } else {
+    balText = '未查询';
+  }
+
+  var canQuery = ch.balanceQueryType === 'deepseek' || ch.balanceQueryType === 'openai';
+
+  var html = '<div class="ds-ch-block" data-chid="' + chId + '" style="border:1px solid var(--SmartThemeBorderColor,#374151);border-left:3px solid ' + color + ';border-radius:6px;margin-bottom:8px;overflow:hidden;">';
+
+  // Channel header (click to collapse)
+  html += '<div class="ds-ch-header" style="padding:6px 8px;display:flex;align-items:center;justify-content:space-between;background:rgba(255,255,255,0.03);cursor:pointer;" data-chid="' + chId + '">';
+  html += '<div style="display:flex;align-items:center;gap:6px;">';
+  html += '<span style="width:8px;height:8px;border-radius:50%;background:' + color + ';display:inline-block;flex-shrink:0;"></span>';
+  html += '<span style="font-size:12px;font-weight:600;color:var(--SmartThemeBodyColor)">' + escapeHTML(ch.name) + '</span>';
+  if (ch.isDefault) html += '<span style="font-size:9px;padding:1px 4px;border-radius:3px;background:rgba(99,102,241,0.2);color:#818cf8;">系统默认</span>';
+  html += '</div>';
+  html += '<div style="display:flex;align-items:center;gap:6px;">';
+  html += '<span style="font-size:10px;color:var(--SmartThemeEmColor)">' + escapeHTML(balText) + '</span>';
+  html += '<i class="fa-solid fa-chevron-down ds-ch-chevron" style="font-size:9px;color:var(--SmartThemeEmColor);transition:none;" data-chid="' + chId + '"></i>';
+  html += '</div></div>';
+
+  // Channel body (collapsed by default)
+  html += '<div class="ds-ch-body" data-chid="' + chId + '" style="display:none;padding:8px;">';
+
+  // API key row
+  html += '<div style="margin-bottom:6px;">';
+  html += '<div style="font-size:9px;color:var(--SmartThemeEmColor);margin-bottom:3px;">API 密钥</div>';
+  html += '<div style="display:flex;gap:4px;">';
+  html += '<input type="password" class="ds-input ds-ch-apikey" data-chid="' + chId + '" value="' + escapeHTML(ch.apiKey || '') + '" placeholder="API 密钥（留空则无）" style="height:24px;padding:3px 6px;font-size:11px;flex:1;min-width:0;">';
+  html += '<button class="ds-btn ds-btn-sm ds-btn-normal ds-ch-save-key" data-chid="' + chId + '" style="padding:2px 8px;font-size:11px;">保存</button>';
+  if (canQuery) html += '<button class="ds-btn ds-btn-sm ds-btn-primary ds-ch-query-bal" data-chid="' + chId + '" style="padding:2px 6px;font-size:11px;">查询</button>';
+  html += '</div></div>';
+
+  // Balance query type
+  html += '<div style="margin-bottom:6px;">';
+  html += '<div style="font-size:9px;color:var(--SmartThemeEmColor);margin-bottom:3px;">余额查询方式</div>';
+  html += '<select class="ds-input-compact ds-ch-qtype" data-chid="' + chId + '" style="height:22px;padding:2px 4px;font-size:11px;">';
+  ['none:无','deepseek:DeepSeek 格式','openai:OpenAI 兼容 (需填 URL)'].forEach(function (opt) {
+    var parts = opt.split(':'); var val = parts[0]; var lbl = parts[1];
+    html += '<option value="' + val + '"' + (ch.balanceQueryType === val ? ' selected' : '') + '>' + lbl + '</option>';
+  });
+  html += '</select>';
+  if (ch.balanceQueryType === 'openai') {
+    html += '<input type="text" class="ds-input ds-ch-qurl" data-chid="' + chId + '" value="' + escapeHTML(ch.balanceQueryUrl || '') + '" placeholder="余额查询 URL" style="height:22px;padding:2px 6px;font-size:11px;width:100%;margin-top:3px;box-sizing:border-box;">';
+  }
+  html += '</div>';
+
+  // Custom balance
+  html += '<div style="margin-bottom:6px;">';
+  html += '<div style="font-size:9px;color:var(--SmartThemeEmColor);margin-bottom:3px;">自定义余额</div>';
+  html += '<div style="display:flex;gap:4px;">';
+  html += '<input type="number" step="0.01" class="ds-input ds-ch-custom-bal" data-chid="' + chId + '" value="' + escapeHTML(ch.customBalance !== null ? ch.customBalance : '') + '" placeholder="留空使用 API 余额" style="height:24px;padding:3px 6px;font-size:11px;flex:1;min-width:0;">';
+  html += '<button class="ds-btn ds-btn-sm ds-btn-success ds-ch-save-bal" data-chid="' + chId + '" style="padding:2px 6px;font-size:11px;">保存</button>';
+  html += '<button class="ds-btn ds-btn-sm ds-btn-danger ds-ch-clear-bal" data-chid="' + chId + '" style="padding:2px 6px;font-size:11px;">清除</button>';
+  html += '</div></div>';
+
+  // Auto-balance toggle
+  html += '<div style="margin-bottom:6px;display:flex;align-items:center;justify-content:space-between;">';
+  html += '<span style="font-size:11px;color:var(--SmartThemeEmColor)">自动校准余额</span>';
+  html += '<label class="ds-switch" style="transform:scale(0.8);transform-origin:right center;"><input type="checkbox" class="ds-ch-auto-bal" data-chid="' + chId + '"' + (ch.autoBalance ? ' checked' : '') + '><span class="ds-switch-slider"></span></label>';
+  html += '</div>';
+  html += '<div class="ds-ch-auto-interval" data-chid="' + chId + '" style="margin-bottom:6px;display:' + (ch.autoBalance ? 'flex' : 'none') + ';align-items:center;gap:4px;">';
+  html += '<span style="font-size:10px;color:var(--SmartThemeEmColor)">每</span>';
+  html += '<input type="number" min="1" max="100" class="ds-input-compact ds-ch-interval" data-chid="' + chId + '" value="' + (ch.balanceInterval || 10) + '" style="width:40px;height:20px;padding:2px 4px;font-size:11px;text-align:center;">';
+  html += '<span style="font-size:10px;color:var(--SmartThemeEmColor)">条自动查询</span></div>';
+
+  // Peak pricing toggle (only for channels with rules that have peak/offpeak)
+  var hasPeakRules = (ch.pricingRules || []).some(function (r) { return r.peak && r.offpeak; });
+  if (hasPeakRules) {
+    html += '<div style="margin-bottom:6px;display:flex;align-items:center;justify-content:space-between;">';
+    html += '<span style="font-size:11px;color:var(--SmartThemeEmColor)">新峰谷定价</span>';
+    html += '<label class="ds-switch" style="transform:scale(0.8);transform-origin:right center;"><input type="checkbox" class="ds-ch-new-pricing" data-chid="' + chId + '"' + (ch.useNewPricing ? ' checked' : '') + '><span class="ds-switch-slider"></span></label>';
+    html += '</div>';
+    html += '<div class="ds-ch-pricing-date" data-chid="' + chId + '" style="margin-bottom:6px;display:' + (ch.useNewPricing ? 'flex' : 'none') + ';align-items:center;gap:4px;">';
+    html += '<span style="font-size:10px;color:var(--SmartThemeEmColor)">生效日</span>';
+    html += '<input type="date" class="ds-input-compact ds-ch-pricing-date-inp" data-chid="' + chId + '" value="' + (ch.newPricingDate ? formatYMD(ch.newPricingDate) : '') + '" style="flex:1;height:20px;padding:2px 4px;font-size:10px;">';
+    html += '<button class="ds-btn ds-btn-sm ds-btn-normal ds-ch-pricing-today" data-chid="' + chId + '" style="padding:1px 5px;font-size:10px;">今天</button>';
+    html += '<div style="font-size:9px;color:var(--SmartThemeEmColor);margin-top:2px;">高峰：9:00~12:00, 14:00~18:00 (北京时间)</div>';
+    html += '</div>';
+  }
+
+  // Pricing rules
+  html += '<div style="font-size:9px;color:var(--SmartThemeEmColor);margin-bottom:4px;margin-top:4px;">定价规则 <span style="color:var(--SmartThemeBodyColor);font-weight:600;">' + (ch.pricingRules || []).length + ' 条</span></div>';
+  html += '<div class="ds-ch-rules-list" data-chid="' + chId + '">';
+  (ch.pricingRules || []).forEach(function (rule) {
+    html += renderRuleRow(ch.id, rule);
+  });
+  html += '</div>';
+  html += '<button class="ds-btn ds-btn-sm ds-btn-normal ds-ch-add-rule" data-chid="' + chId + '" style="width:100%;margin-top:4px;display:flex;align-items:center;justify-content:center;gap:4px;padding:3px;font-size:11px;"><i class="fa-solid fa-plus" style="font-size:9px;"></i> 添加规则</button>';
+  html += '<div class="ds-ch-rule-form" data-chid="' + chId + '" style="display:none;margin-top:6px;"></div>';
+
+  // Channel rename + color
+  html += '<div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--SmartThemeBorderColor,#374151);">';
+  html += '<div style="display:flex;gap:4px;margin-bottom:4px;">';
+  html += '<input type="text" class="ds-input ds-ch-rename" data-chid="' + chId + '" value="' + escapeHTML(ch.name) + '" placeholder="渠道名称" style="height:24px;padding:3px 6px;font-size:11px;flex:1;min-width:0;">';
+  html += '<input type="color" class="ds-ch-color-pick" data-chid="' + chId + '" value="' + (ch.color || '#6366f1') + '" style="width:28px;height:24px;padding:1px;border:none;background:transparent;cursor:pointer;">';
+  html += '<button class="ds-btn ds-btn-sm ds-btn-normal ds-ch-save-name" data-chid="' + chId + '" style="padding:2px 8px;font-size:11px;">保存</button>';
+  html += '</div>';
+  if (!ch.isDefault) {
+    html += '<button class="ds-btn ds-btn-sm ds-btn-danger ds-ch-delete" data-chid="' + chId + '" style="width:100%;font-size:11px;">删除此渠道</button>';
+  }
+  html += '</div>';
+
+  html += '</div>'; // ds-ch-body
+  html += '</div>'; // ds-ch-block
+  return html;
+}
+
+function renderRuleRow(chId, rule) {
+  var ruleId = escapeHTML(rule.id);
+  var cid = escapeHTML(chId);
+  var prices = 'h¥' + rule.hit + ' m¥' + rule.miss + ' o¥' + rule.output;
+  var html = '<div class="ds-rule-row" data-chid="' + cid + '" data-ruleid="' + ruleId + '" style="display:flex;align-items:center;gap:4px;padding:3px 0;font-size:11px;border-bottom:1px solid rgba(255,255,255,0.04);">';
+  html += '<input type="checkbox" class="ds-rule-toggle" data-chid="' + cid + '" data-ruleid="' + ruleId + '"' + (rule.enabled ? ' checked' : '') + ' style="flex-shrink:0;">';
+  html += '<div style="flex:1;min-width:0;">';
+  html += '<div style="font-weight:500;color:var(--SmartThemeBodyColor);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="' + escapeHTML(rule.pattern) + '">' + escapeHTML(rule.label || rule.pattern) + '</div>';
+  html += '<div style="font-size:9px;color:var(--SmartThemeEmColor);">' + escapeHTML(prices) + '</div>';
+  html += '</div>';
+  if (rule.isDefault) {
+    html += '<span style="font-size:9px;padding:1px 3px;border-radius:2px;background:rgba(99,102,241,0.15);color:#818cf8;flex-shrink:0;">预置</span>';
+  } else {
+    html += '<button class="ds-btn ds-btn-sm ds-btn-normal ds-rule-edit" data-chid="' + cid + '" data-ruleid="' + ruleId + '" style="padding:1px 6px;font-size:10px;flex-shrink:0;">编辑</button>';
+    html += '<button class="ds-btn ds-btn-sm ds-btn-danger ds-rule-delete" data-chid="' + cid + '" data-ruleid="' + ruleId + '" style="padding:1px 6px;font-size:10px;flex-shrink:0;">删除</button>';
+  }
+  html += '</div>';
+  return html;
+}
+
+function renderRuleForm(chId, existingRule) {
+  // existingRule is null for new, or the rule object for edit
+  var r = existingRule || { pattern: '', label: '', hit: 0, miss: 0, output: 0 };
+  var html = '<div style="background:rgba(255,255,255,0.03);border:1px solid var(--SmartThemeBorderColor,#374151);border-radius:6px;padding:8px;">';
+  html += '<div style="font-size:10px;font-weight:600;color:var(--SmartThemeBodyColor);margin-bottom:6px;">' + (existingRule ? '编辑规则' : '添加规则') + '</div>';
+  html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;margin-bottom:4px;">';
+  html += '<div><div style="font-size:9px;color:var(--SmartThemeEmColor);margin-bottom:2px;">匹配关键字 <span style="color:#f87171">*</span></div>' +
+          '<input type="text" id="ds-rf-pattern" class="ds-input-compact" value="' + escapeHTML(r.pattern) + '" placeholder="如: gpt-4o" style="height:22px;padding:2px 4px;font-size:11px;width:100%;box-sizing:border-box;"></div>';
+  html += '<div><div style="font-size:9px;color:var(--SmartThemeEmColor);margin-bottom:2px;">显示名称 (可选)</div>' +
+          '<input type="text" id="ds-rf-label" class="ds-input-compact" value="' + escapeHTML(r.label || '') + '" placeholder="如: GPT-4o" style="height:22px;padding:2px 4px;font-size:11px;width:100%;box-sizing:border-box;"></div>';
+  html += '<div><div style="font-size:9px;color:var(--SmartThemeEmColor);margin-bottom:2px;">命中价格 (CNY/1M)</div>' +
+          '<input type="number" step="any" id="ds-rf-hit" class="ds-input-compact" value="' + r.hit + '" style="height:22px;padding:2px 4px;font-size:11px;width:100%;box-sizing:border-box;"></div>';
+  html += '<div><div style="font-size:9px;color:var(--SmartThemeEmColor);margin-bottom:2px;">未命中价格 (CNY/1M)</div>' +
+          '<input type="number" step="any" id="ds-rf-miss" class="ds-input-compact" value="' + r.miss + '" style="height:22px;padding:2px 4px;font-size:11px;width:100%;box-sizing:border-box;"></div>';
+  html += '<div><div style="font-size:9px;color:var(--SmartThemeEmColor);margin-bottom:2px;">输出价格 (CNY/1M)</div>' +
+          '<input type="number" step="any" id="ds-rf-output" class="ds-input-compact" value="' + r.output + '" style="height:22px;padding:2px 4px;font-size:11px;width:100%;box-sizing:border-box;"></div>';
+  html += '</div>';
+  html += '<div id="ds-rf-error" style="font-size:10px;color:#f87171;min-height:14px;margin-bottom:4px;"></div>';
+  html += '<div style="display:flex;gap:4px;">';
+  html += '<button id="ds-rf-save" class="ds-btn ds-btn-sm ds-btn-primary" style="flex:1;font-size:11px;">保存</button>';
+  html += '<button id="ds-rf-cancel" class="ds-btn ds-btn-sm ds-btn-normal" style="flex:1;font-size:11px;">取消</button>';
+  html += '</div></div>';
+  return html;
+}
+
+function showAddChannelInlineForm(doc) {
+  var container = doc.getElementById('ds-channel-manager');
+  if (!container) return;
+
+  // Check if form already exists
+  var existing = container.querySelector('#ds-add-ch-form');
+  if (existing) { existing.remove(); return; }
+
+  var form = doc.createElement('div');
+  form.id = 'ds-add-ch-form';
+  form.style.cssText = 'background:rgba(255,255,255,0.03);border:1px solid var(--SmartThemeBorderColor,#374151);border-radius:6px;padding:8px;margin-bottom:8px;';
+  form.innerHTML =
+    '<div style="font-size:10px;font-weight:600;color:var(--SmartThemeBodyColor);margin-bottom:6px;">新增渠道</div>' +
+    '<div style="margin-bottom:4px;"><div style="font-size:9px;color:var(--SmartThemeEmColor);margin-bottom:2px;">渠道名称 <span style="color:#f87171">*</span></div>' +
+    '<input type="text" id="ds-nch-name" class="ds-input" placeholder="如: 硅基流动" style="height:24px;padding:3px 6px;font-size:11px;width:100%;box-sizing:border-box;"></div>' +
+    '<div style="margin-bottom:6px;"><div style="font-size:9px;color:var(--SmartThemeEmColor);margin-bottom:2px;">标识颜色</div>' +
+    '<input type="color" id="ds-nch-color" value="#10b981" style="width:28px;height:24px;padding:1px;border:none;background:transparent;cursor:pointer;"></div>' +
+    '<div style="margin-bottom:6px;"><div style="font-size:9px;color:var(--SmartThemeEmColor);margin-bottom:2px;">余额查询方式</div>' +
+    '<select id="ds-nch-qtype" class="ds-input-compact" style="height:22px;padding:2px 4px;font-size:11px;">' +
+    '<option value="none">无</option><option value="deepseek">DeepSeek 格式</option><option value="openai">OpenAI 兼容</option>' +
+    '</select></div>' +
+    '<div id="ds-nch-error" style="font-size:10px;color:#f87171;min-height:14px;margin-bottom:4px;"></div>' +
+    '<div style="display:flex;gap:4px;">' +
+    '<button id="ds-nch-create" class="ds-btn ds-btn-sm ds-btn-primary" style="flex:1;font-size:11px;">创建</button>' +
+    '<button id="ds-nch-cancel" class="ds-btn ds-btn-sm ds-btn-normal" style="flex:1;font-size:11px;">取消</button>' +
+    '</div>';
+
+  var addBtn = container.querySelector('#ds-cm-add-channel');
+  if (addBtn) container.insertBefore(form, addBtn.nextSibling);
+  else container.insertBefore(form, container.firstChild);
+
+  var createBtn = form.querySelector('#ds-nch-create');
+  var cancelBtn = form.querySelector('#ds-nch-cancel');
+  var errEl     = form.querySelector('#ds-nch-error');
+
+  if (cancelBtn) cancelBtn.onclick = function () { form.remove(); };
+  if (createBtn) createBtn.onclick = function () {
+    var name   = (form.querySelector('#ds-nch-name').value || '').trim();
+    var color2 = form.querySelector('#ds-nch-color').value || '#10b981';
+    var qtype  = form.querySelector('#ds-nch-qtype').value;
+    if (!name) { if (errEl) errEl.textContent = '请填写渠道名称'; return; }
+    var newCh = {
+      id: makeNewChannelId(), name: name, color: color2, isDefault: false,
+      apiKey: '', balanceQueryType: qtype, balanceQueryUrl: '',
+      balance: null, customBalance: null,
+      autoBalance: false, balanceInterval: 10, messageCount: 0,
+      useNewPricing: false, newPricingDate: new Date('2026-07-15T00:00:00+08:00').getTime(),
+      pricingRules: [],
+    };
+    state.settings.channels.push(newCh);
+    saveSettings();
+    form.remove();
+    renderChannelManager(doc);
+  };
+}
+
+function bindChannelManagerControls(doc, container) {
+  // Channel header toggle (collapse/expand)
+  container.querySelectorAll('.ds-ch-header').forEach(function (header) {
+    header.onclick = function () {
+      var chId = header.getAttribute('data-chid');
+      var body = container.querySelector('.ds-ch-body[data-chid="' + chId + '"]');
+      var chev = container.querySelector('.ds-ch-chevron[data-chid="' + chId + '"]');
+      if (!body) return;
+      var isOpen = body.style.display !== 'none';
+      body.style.display = isOpen ? 'none' : 'block';
+      if (chev) chev.style.transform = isOpen ? '' : 'rotate(180deg)';
+    };
+  });
+
+  // Save API key
+  container.querySelectorAll('.ds-ch-save-key').forEach(function (btn) {
+    btn.onclick = async function () {
+      var chId = btn.getAttribute('data-chid');
+      var ch = getChannelById(chId);
+      if (!ch) return;
+      var inp = container.querySelector('.ds-ch-apikey[data-chid="' + chId + '"]');
+      ch.apiKey = encryptKey((inp ? inp.value.trim() : ''));
+      // Store decrypted for runtime use
+      ch.apiKey = inp ? inp.value.trim() : '';
+      await saveSettings();
+      btn.textContent = '✓'; setTimeout(function () { btn.textContent = '保存'; }, 1000);
+    };
+  });
+
+  // Query balance
+  container.querySelectorAll('.ds-ch-query-bal').forEach(function (btn) {
+    btn.onclick = function () {
+      var chId = btn.getAttribute('data-chid');
+      var ch = getChannelById(chId);
+      if (ch) fetchChannelBalance(ch, false);
+    };
+  });
+
+  // Balance query type change
+  container.querySelectorAll('.ds-ch-qtype').forEach(function (sel) {
+    sel.onchange = async function () {
+      var chId = sel.getAttribute('data-chid');
+      var ch = getChannelById(chId);
+      if (!ch) return;
+      ch.balanceQueryType = sel.value;
+      await saveSettings();
+      renderChannelManager(doc);
+    };
+  });
+
+  // Query URL
+  container.querySelectorAll('.ds-ch-qurl').forEach(function (inp) {
+    inp.onchange = async function () {
+      var chId = inp.getAttribute('data-chid');
+      var ch = getChannelById(chId);
+      if (ch) { ch.balanceQueryUrl = inp.value.trim(); await saveSettings(); }
+    };
+  });
+
+  // Custom balance save/clear
+  container.querySelectorAll('.ds-ch-save-bal').forEach(function (btn) {
+    btn.onclick = async function () {
+      var chId = btn.getAttribute('data-chid');
+      var ch = getChannelById(chId);
+      if (!ch) return;
+      var inp = container.querySelector('.ds-ch-custom-bal[data-chid="' + chId + '"]');
+      var val = inp ? inp.value.trim() : '';
+      if (!val || isNaN(parseFloat(val))) return;
+      ch.customBalance = val;
+      await saveSettings(); refreshUI();
+    };
+  });
+  container.querySelectorAll('.ds-ch-clear-bal').forEach(function (btn) {
+    btn.onclick = async function () {
+      var chId = btn.getAttribute('data-chid');
+      var ch = getChannelById(chId);
+      if (!ch) return;
+      ch.customBalance = null;
+      var inp = container.querySelector('.ds-ch-custom-bal[data-chid="' + chId + '"]');
+      if (inp) inp.value = '';
+      await saveSettings(); refreshUI();
+    };
+  });
+
+  // Auto-balance toggle
+  container.querySelectorAll('.ds-ch-auto-bal').forEach(function (chk) {
+    chk.onchange = async function () {
+      var chId = chk.getAttribute('data-chid');
+      var ch = getChannelById(chId);
+      if (!ch) return;
+      ch.autoBalance = chk.checked;
+      var intervalDiv = container.querySelector('.ds-ch-auto-interval[data-chid="' + chId + '"]');
+      if (intervalDiv) intervalDiv.style.display = chk.checked ? 'flex' : 'none';
+      await saveSettings();
+    };
+  });
+  container.querySelectorAll('.ds-ch-interval').forEach(function (inp) {
+    inp.onchange = async function () {
+      var chId = inp.getAttribute('data-chid');
+      var ch = getChannelById(chId);
+      if (ch) { ch.balanceInterval = parseInt(inp.value, 10) || 10; await saveSettings(); }
+    };
+  });
+
+  // Peak pricing toggle
+  container.querySelectorAll('.ds-ch-new-pricing').forEach(function (chk) {
+    chk.onchange = async function () {
+      var chId = chk.getAttribute('data-chid');
+      var ch = getChannelById(chId);
+      if (!ch) return;
+      ch.useNewPricing = chk.checked;
+      var dateDiv = container.querySelector('.ds-ch-pricing-date[data-chid="' + chId + '"]');
+      if (dateDiv) dateDiv.style.display = chk.checked ? 'flex' : 'none';
+      await saveSettings();
+    };
+  });
+  container.querySelectorAll('.ds-ch-pricing-date-inp').forEach(function (inp) {
+    inp.onchange = async function () {
+      var chId = inp.getAttribute('data-chid');
+      var ch = getChannelById(chId);
+      if (ch && inp.value) { ch.newPricingDate = new Date(inp.value + 'T00:00:00+08:00').getTime(); await saveSettings(); }
+    };
+  });
+  container.querySelectorAll('.ds-ch-pricing-today').forEach(function (btn) {
+    btn.onclick = async function () {
+      var chId = btn.getAttribute('data-chid');
+      var ch = getChannelById(chId);
+      if (!ch) return;
+      var today = formatYMD(Date.now());
+      var inp = container.querySelector('.ds-ch-pricing-date-inp[data-chid="' + chId + '"]');
+      if (inp) inp.value = today;
+      ch.newPricingDate = new Date(today + 'T00:00:00+08:00').getTime();
+      await saveSettings();
+    };
+  });
+
+  // Rule toggle
+  container.querySelectorAll('.ds-rule-toggle').forEach(function (chk) {
+    chk.onchange = async function () {
+      var chId = chk.getAttribute('data-chid');
+      var ruleId = chk.getAttribute('data-ruleid');
+      var ch = getChannelById(chId);
+      if (!ch) return;
+      var rule = (ch.pricingRules || []).find(function (r) { return r.id === ruleId; });
+      if (rule) { rule.enabled = chk.checked; await saveSettings(); }
+    };
+  });
+
+  // Rule edit
+  container.querySelectorAll('.ds-rule-edit').forEach(function (btn) {
+    btn.onclick = function () {
+      var chId   = btn.getAttribute('data-chid');
+      var ruleId = btn.getAttribute('data-ruleid');
+      var ch     = getChannelById(chId);
+      if (!ch) return;
+      var rule = (ch.pricingRules || []).find(function (r) { return r.id === ruleId; });
+      if (!rule) return;
+      var formContainer = container.querySelector('.ds-ch-rule-form[data-chid="' + chId + '"]');
+      if (!formContainer) return;
+      formContainer.style.display = 'block';
+      formContainer.innerHTML = renderRuleForm(chId, rule);
+      bindRuleForm(doc, formContainer, chId, rule);
+    };
+  });
+
+  // Rule delete
+  container.querySelectorAll('.ds-rule-delete').forEach(function (btn) {
+    btn.onclick = async function () {
+      var chId   = btn.getAttribute('data-chid');
+      var ruleId = btn.getAttribute('data-ruleid');
+      if (!confirm('确定删除此定价规则？')) return;
+      var ch = getChannelById(chId);
+      if (!ch) return;
+      ch.pricingRules = (ch.pricingRules || []).filter(function (r) { return r.id !== ruleId; });
+      await saveSettings();
+      renderChannelManager(doc);
+    };
+  });
+
+  // Add rule
+  container.querySelectorAll('.ds-ch-add-rule').forEach(function (btn) {
+    btn.onclick = function () {
+      var chId = btn.getAttribute('data-chid');
+      var formContainer = container.querySelector('.ds-ch-rule-form[data-chid="' + chId + '"]');
+      if (!formContainer) return;
+      if (formContainer.style.display !== 'none') { formContainer.style.display = 'none'; formContainer.innerHTML = ''; return; }
+      formContainer.style.display = 'block';
+      formContainer.innerHTML = renderRuleForm(chId, null);
+      bindRuleForm(doc, formContainer, chId, null);
+    };
+  });
+
+  // Rename + color
+  container.querySelectorAll('.ds-ch-save-name').forEach(function (btn) {
+    btn.onclick = async function () {
+      var chId = btn.getAttribute('data-chid');
+      var ch = getChannelById(chId);
+      if (!ch) return;
+      var nameInp  = container.querySelector('.ds-ch-rename[data-chid="' + chId + '"]');
+      var colorInp = container.querySelector('.ds-ch-color-pick[data-chid="' + chId + '"]');
+      if (nameInp && nameInp.value.trim()) ch.name = nameInp.value.trim();
+      if (colorInp) ch.color = colorInp.value;
+      await saveSettings();
+      renderChannelManager(doc);
+      refreshUI();
+    };
+  });
+
+  // Delete channel
+  container.querySelectorAll('.ds-ch-delete').forEach(function (btn) {
+    btn.onclick = async function () {
+      var chId = btn.getAttribute('data-chid');
+      if (!confirm('确定删除此渠道？其定价规则将被清除。')) return;
+      state.settings.channels = getChannels().filter(function (ch) { return ch.id !== chId; });
+      await saveSettings();
+      renderChannelManager(doc);
+      refreshUI();
+    };
+  });
+}
+
+function bindRuleForm(doc, formContainer, chId, existingRule) {
+  var saveBtn   = formContainer.querySelector('#ds-rf-save');
+  var cancelBtn = formContainer.querySelector('#ds-rf-cancel');
+  var errEl     = formContainer.querySelector('#ds-rf-error');
+
+  if (cancelBtn) cancelBtn.onclick = function () { formContainer.style.display = 'none'; formContainer.innerHTML = ''; };
+
+  if (saveBtn) saveBtn.onclick = async function () {
+    var pattern = (formContainer.querySelector('#ds-rf-pattern').value || '').trim();
+    var label   = (formContainer.querySelector('#ds-rf-label').value || '').trim();
+    var hit     = parseFloat(formContainer.querySelector('#ds-rf-hit').value)    || 0;
+    var miss    = parseFloat(formContainer.querySelector('#ds-rf-miss').value)   || 0;
+    var output  = parseFloat(formContainer.querySelector('#ds-rf-output').value) || 0;
+
+    if (!pattern) { if (errEl) errEl.textContent = '请填写匹配关键字'; return; }
+
+    var ch = getChannelById(chId);
+    if (!ch) return;
+
+    if (existingRule) {
+      // Edit existing
+      var rule = (ch.pricingRules || []).find(function (r) { return r.id === existingRule.id; });
+      if (rule) { rule.pattern = pattern; rule.label = label; rule.hit = hit; rule.miss = miss; rule.output = output; }
+    } else {
+      // Add new
+      if (!Array.isArray(ch.pricingRules)) ch.pricingRules = [];
+      ch.pricingRules.push({ id: makeNewRuleId(), pattern: pattern, label: label, hit: hit, miss: miss, output: output, isDefault: false, enabled: true });
+    }
+
+    await saveSettings();
+    formContainer.style.display = 'none'; formContainer.innerHTML = '';
+    renderChannelManager(doc);
+  };
+}
+
+// ─── Save Selector ────────────────────────────────────────────────────────────
 function refreshSaveSelect() {
   var doc    = (window.parent || window).document;
   var select = doc.getElementById('ds-save-select');
   if (!select) return;
-
-  // Build a lightweight hash to skip unnecessary full redraws
   var keys = Object.keys(state.saves);
-  var newHash = state.currentSave + '|' + keys.map(function (k) {
-    return k + ':' + (state.saves[k].rounds || 0);
-  }).join(',');
+  var newHash = state.currentSave + '|' + keys.map(function (k) { return k + ':' + (state.saves[k].rounds || 0); }).join(',');
   if (newHash === _saveSelectHash) return;
   _saveSelectHash = newHash;
-
-  var html = '<option value="__all__"' +
-    (state.currentSave === '__all__' ? ' selected' : '') +
-    '>全部存档 (合并统计)</option>';
-
-  keys
-    .sort(function (a, b) {
-      return (state.saves[b].startTime || 0) - (state.saves[a].startTime || 0);
-    })
-    .forEach(function (k) {
-      var s = state.saves[k];
-      html += '<option value="' + k + '"' +
-        (k === state.currentSave ? ' selected' : '') + '>' +
-        s.name + ' (' + (s.rounds || 0) + '轮)</option>';
-    });
-
+  var html = '<option value="__all__"' + (state.currentSave === '__all__' ? ' selected' : '') + '>全部存档 (合并统计)</option>';
+  keys.sort(function (a, b) { return (state.saves[b].startTime || 0) - (state.saves[a].startTime || 0); })
+      .forEach(function (k) {
+        var s = state.saves[k];
+        html += '<option value="' + k + '"' + (k === state.currentSave ? ' selected' : '') + '>' + s.name + ' (' + (s.rounds || 0) + '轮)</option>';
+      });
   select.innerHTML = html;
 }
 
-// ─── Panel toggle ─────────────────────────────────────────────────────────────
+// ─── Panel Toggle ─────────────────────────────────────────────────────────────
 var _ds_last_toggle = 0;
 function togglePanel() {
   if (!isInitDone) return;
-  // Bug fix #12: use a shorter guard (500ms) — 3s was too conservative and
-  // prevented opening the panel shortly after page load
   if (Date.now() - initTimestamp < 500) return;
   if (Date.now() - _ds_last_toggle < 300) return;
   _ds_last_toggle = Date.now();
-
-  var p   = window.parent || window;
-  var ov  = p.document.getElementById('ds-overlay');
-  var pn  = p.document.getElementById('ds-panel');
+  var p  = window.parent || window;
+  var ov = p.document.getElementById('ds-overlay');
+  var pn = p.document.getElementById('ds-panel');
   if (!ov || !pn) { createUI(); return; }
-
   if (state.panelOpen) {
-    ov.style.display = 'none';
-    pn.classList.remove('ds-open');
-    state.panelOpen = false;
+    ov.style.display = 'none'; pn.classList.remove('ds-open'); state.panelOpen = false;
   } else {
-    syncViewportHeight();
-    updateDynamicThemeColors();
-    ov.style.display = 'block';
-    pn.classList.add('ds-open');
-    state.panelOpen = true;
+    syncViewportHeight(); updateDynamicThemeColors();
+    ov.style.display = 'block'; pn.classList.add('ds-open'); state.panelOpen = true;
     refreshUI();
   }
 }
 
-// ─── UI refresh ───────────────────────────────────────────────────────────────
+// ─── UI Refresh ───────────────────────────────────────────────────────────────
 function refreshUI() {
-  // Debounce: coalesce multiple synchronous calls into one rAF paint
   if (_refreshPending) return;
   _refreshPending = true;
   (window.parent || window).requestAnimationFrame(function () {
@@ -2567,329 +2167,368 @@ function refreshUI() {
   });
 }
 
+// ─── Model filter: get filtered data ─────────────────────────────────────────
+function getFilteredDisplayData(s) {
+  if (!s) return s;
+  var filter = state.activeModelFilter || '__all__';
+  if (filter === '__all__') return s;
+
+  var history = (s.history || []).filter(function (h) { return h.model === filter; });
+  var fd = {
+    rounds: history.length,
+    total_tokens: 0, total_cost: 0, input_tokens: 0, output_tokens: 0,
+    cache_hit_tokens: 0, cache_miss_tokens: 0, input_cost: 0, output_cost: 0,
+    history: history, startTime: s.startTime,
+  };
+  history.forEach(function (item) {
+    fd.total_tokens      += item.total_tokens      || 0;
+    fd.total_cost        += item.cost              || 0;
+    fd.input_tokens      += item.prompt_tokens     || 0;
+    fd.output_tokens     += item.completion_tokens || 0;
+    fd.cache_hit_tokens  += item.cache_hit_tokens  || 0;
+    fd.cache_miss_tokens += item.cache_miss_tokens || 0;
+    fd.input_cost        += item.input_cost        || 0;
+    fd.output_cost       += item.output_cost       || 0;
+  });
+  return fd;
+}
+
+// ─── Savings computation (from history items) ─────────────────────────────────
+function computeSavingsFromHistory(history) {
+  var total = 0;
+  (history || []).forEach(function (item) {
+    if (!item.cache_hit_tokens || item.cache_hit_tokens <= 0) return;
+    if (item.pricingType === 'unknown') return;
+    // We stored hitPrice and missPrice at record time
+    var hitP  = item.hitPrice  || 0;
+    var missP = item.missPrice || 0;
+    if (missP > hitP) {
+      total += (item.cache_hit_tokens / 1e6) * (missP - hitP);
+    }
+  });
+  return total;
+}
+
+// ─── Model Filter Render ──────────────────────────────────────────────────────
+function renderModelFilter(doc, s) {
+  var container = doc.getElementById('ds-model-filter');
+  if (!container) return;
+
+  if (!s || !s.history || s.history.length === 0) { container.innerHTML = ''; return; }
+
+  // Collect unique models
+  var models = [], seen = {};
+  s.history.forEach(function (item) {
+    if (item.model && !seen[item.model]) { seen[item.model] = true; models.push(item.model); }
+  });
+
+  if (models.length < 2) { container.innerHTML = ''; return; }
+
+  var active = state.activeModelFilter || '__all__';
+  var html = '<div style="display:flex;flex-wrap:wrap;gap:3px;">';
+  html += '<button class="ds-btn ds-btn-sm ds-model-filter-btn ' + (active === '__all__' ? 'ds-btn-primary' : 'ds-btn-normal') + '" data-model="__all__" style="padding:1px 6px;font-size:10px;">全部</button>';
+  models.forEach(function (m) {
+    var shortName = m.length > 22 ? m.slice(0, 20) + '…' : m;
+    html += '<button class="ds-btn ds-btn-sm ds-model-filter-btn ' + (active === m ? 'ds-btn-primary' : 'ds-btn-normal') + '" data-model="' + escapeHTML(m) + '" title="' + escapeHTML(m) + '" style="padding:1px 6px;font-size:10px;">' + escapeHTML(shortName) + '</button>';
+  });
+  html += '</div>';
+  container.innerHTML = html;
+
+  container.querySelectorAll('.ds-model-filter-btn').forEach(function (btn) {
+    btn.onclick = function () { state.activeModelFilter = btn.getAttribute('data-model'); refreshUI(); };
+  });
+}
+
+// ─── Balance Module Render ────────────────────────────────────────────────────
+function renderBalanceModule(doc, displaySave) {
+  var container = doc.getElementById('ds-balance-cards');
+  if (!container) return;
+
+  var channels = getChannels();
+  if (channels.length === 0) { container.innerHTML = '<div class="ds-wait-text">暂无渠道配置</div>'; return; }
+
+  var layout = state.settings.balanceLayout || 'vertical';
+  var layoutIcon = doc.getElementById('ds-btn-balance-layout');
+  if (layoutIcon) {
+    layoutIcon.title = layout === 'vertical' ? '切换为横排' : '切换为竖排';
+    layoutIcon.innerHTML = layout === 'vertical'
+      ? '<i class="fa-solid fa-table-columns" style="font-size:11px;"></i>'
+      : '<i class="fa-solid fa-table-cells-large" style="font-size:11px;"></i>';
+  }
+
+  var html = '';
+  if (layout === 'horizontal') {
+    html = '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:6px;">';
+  } else {
+    html = '<div style="display:flex;flex-direction:column;gap:6px;">';
+  }
+
+  channels.forEach(function (ch) {
+    var bal;
+    var balText, balSource;
+
+    if (ch.customBalance !== null && ch.customBalance !== '') {
+      bal = parseFloat(ch.customBalance);
+      balText = '¥' + bal.toFixed(2) + ' CNY';
+      balSource = '自定义余额';
+    } else if (ch.balance && ch.balance.balance != null) {
+      bal = parseFloat(ch.balance.balance);
+      balText = '¥' + bal.toFixed(2) + ' ' + (ch.balance.currency || 'CNY');
+      balSource = ch.balance.timestamp ? new Date(ch.balance.timestamp).toLocaleTimeString('zh-CN') : '账户可用';
+    } else {
+      bal = null;
+      balText = '¥0.00 CNY';
+      balSource = '未查询';
+    }
+
+    // Remaining rounds: use history items for this channel
+    var remText = '';
+    if (bal !== null && bal > 0 && displaySave) {
+      var chHistory = (displaySave.history || []).filter(function (h) { return h.channelId === ch.id; });
+      var rem = calculateRemainingRoundsForChannel(chHistory, bal);
+      if (rem !== null) remText = '预计还可进行 ' + rem + ' 轮';
+    }
+
+    var color = ch.color || '#6366f1';
+    var canQuery = (ch.balanceQueryType === 'deepseek' || ch.balanceQueryType === 'openai') && ch.apiKey;
+
+    html += '<div style="border-left:3px solid ' + escapeHTML(color) + ';padding:7px 10px;background:rgba(255,255,255,0.03);border-radius:0 6px 6px 0;">';
+    html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:3px;">';
+    html += '<span style="font-size:10px;font-weight:600;color:' + escapeHTML(color) + '">' + escapeHTML(ch.name) + '</span>';
+    if (canQuery) {
+      html += '<button class="ds-btn ds-btn-sm ds-btn-primary ds-query-ch-btn" data-chid="' + escapeHTML(ch.id) + '" style="padding:1px 6px;font-size:9px;">查询</button>';
+    }
+    html += '</div>';
+    html += '<div style="font-size:16px;font-weight:700;color:var(--SmartThemeBodyColor);">' + escapeHTML(balText) + '</div>';
+    if (balSource) html += '<div style="font-size:9px;color:var(--SmartThemeEmColor);margin-top:1px;">' + escapeHTML(balSource) + '</div>';
+    if (remText)   html += '<div style="font-size:10px;color:var(--SmartThemeEmColor);margin-top:2px;">' + escapeHTML(remText) + '</div>';
+    html += '</div>';
+  });
+
+  html += '</div>';
+  container.innerHTML = html;
+
+  container.querySelectorAll('.ds-query-ch-btn').forEach(function (btn) {
+    btn.onclick = function () {
+      var chId = btn.getAttribute('data-chid');
+      var ch = getChannelById(chId);
+      if (ch) fetchChannelBalance(ch, false);
+    };
+  });
+}
+
+// ─── Main Refresh ─────────────────────────────────────────────────────────────
 function _doRefreshUI() {
   var doc = (window.parent || window).document;
   function el(id) { return doc.getElementById(id); }
 
   refreshSaveSelect();
 
-  // Bug fix #1 / display: use the display-safe accessor
-  var s = getSelectedSaveForDisplay();
+  var rawSave = getSelectedSaveForDisplay();
+  if (!rawSave) return;
+
+  // Render model filter based on raw (unfiltered) save
+  renderModelFilter(doc, rawSave);
+
+  // Get filtered data for stat display
+  var s = getFilteredDisplayData(rawSave);
   if (!s) return;
+
+  // Balance module
+  renderBalanceModule(doc, rawSave);
 
   // Header timing
   if (el('ds-save-time')) {
-    el('ds-save-time').textContent = state.currentSave === '__all__'
-      ? '' : '开始于 ' + formatStartTime(s.startTime);
+    el('ds-save-time').textContent = state.currentSave === '__all__' ? '' : '开始于 ' + formatStartTime(s.startTime);
   }
 
-  // Overview stats
+  // Stats
   if (el('ds-total-tokens')) el('ds-total-tokens').textContent = formatTokens(s.total_tokens || 0);
   if (el('ds-total-cost'))   el('ds-total-cost').textContent   = '¥' + (s.total_cost || 0).toFixed(4);
   if (el('ds-rounds'))       el('ds-rounds').textContent       = '基于 ' + (s.rounds || 0) + ' 轮';
 
-  // Weighted cache hit rate over full history
+  // Weighted hit rate
   var tp = 0, th = 0;
-  (s.history || []).forEach(function (item) {
-    tp += item.prompt_tokens    || 0;
-    th += item.cache_hit_tokens || 0;
-  });
-  if (el('ds-weighted-rate')) {
-    el('ds-weighted-rate').textContent = (tp > 0 ? (th / tp * 100) : 0).toFixed(1) + '%';
-  }
+  (s.history || []).forEach(function (item) { tp += item.prompt_tokens || 0; th += item.cache_hit_tokens || 0; });
+  if (el('ds-weighted-rate')) el('ds-weighted-rate').textContent = (tp > 0 ? (th / tp * 100) : 0).toFixed(1) + '%';
 
   // Per-round averages
   if ((s.rounds || 0) > 0) {
     if (el('ds-avg-tokens')) el('ds-avg-tokens').textContent = formatTokens((s.total_tokens || 0) / s.rounds);
-    if (el('ds-avg-cost'))   el('ds-avg-cost').textContent   = '¥' + ((s.total_cost   || 0) / s.rounds).toFixed(4);
+    if (el('ds-avg-cost'))   el('ds-avg-cost').textContent   = '¥' + ((s.total_cost || 0) / s.rounds).toFixed(4);
+  } else {
+    if (el('ds-avg-tokens')) el('ds-avg-tokens').textContent = '0';
+    if (el('ds-avg-cost'))   el('ds-avg-cost').textContent   = '¥0.0000';
   }
 
-  // Savings estimate (cache hit tokens billed at ~2% of miss price for deepseek-v4-flash)
-  var sv = (s.cache_hit_tokens || 0) * 0.98 / 1e6;
+  // Savings (computed from per-item prices)
+  var sv = computeSavingsFromHistory(s.history);
   if (el('ds-savings'))        el('ds-savings').textContent        = '¥' + sv.toFixed(4);
   if (el('ds-savings-tokens')) el('ds-savings-tokens').textContent = formatTokens(s.cache_hit_tokens || 0);
 
-  // Input / output cost breakdown
+  // Input/output cost
   if (el('ds-input-cost'))    el('ds-input-cost').textContent    = '¥' + (s.input_cost    || 0).toFixed(4);
   if (el('ds-input-tokens'))  el('ds-input-tokens').textContent  = formatTokens(s.input_tokens || 0);
   if (el('ds-output-cost'))   el('ds-output-cost').textContent   = '¥' + (s.output_cost   || 0).toFixed(4);
   if (el('ds-output-tokens')) el('ds-output-tokens').textContent = formatTokens(s.output_tokens || 0);
 
-  // New 6 cards calculations
-  var roundsCount = s.rounds || 0;
-  var totalTokens = s.total_tokens || 0;
-  var hitTokens = s.cache_hit_tokens || 0;
-  var missTokens = s.cache_miss_tokens || 0;
-  var inputTokens = s.input_tokens || 0;
-  var outputTokens = s.output_tokens || 0;
-
-  var avgTotalTokens = roundsCount > 0 ? Math.round(totalTokens / roundsCount) : 0;
-  var avgInputTokens = roundsCount > 0 ? Math.round(inputTokens / roundsCount) : 0;
+  // Extended stats cards
+  var roundsCount   = s.rounds || 0;
+  var totalTokens   = s.total_tokens || 0;
+  var hitTokens     = s.cache_hit_tokens || 0;
+  var missTokens    = s.cache_miss_tokens || 0;
+  var inputTokens   = s.input_tokens || 0;
+  var outputTokens  = s.output_tokens || 0;
+  var avgTotalTokens  = roundsCount > 0 ? Math.round(totalTokens / roundsCount) : 0;
+  var avgInputTokens  = roundsCount > 0 ? Math.round(inputTokens / roundsCount) : 0;
   var avgOutputTokens = roundsCount > 0 ? Math.round(outputTokens / roundsCount) : 0;
-
-  var hitRatePct = inputTokens > 0 ? (hitTokens / inputTokens * 100).toFixed(1) : '0.0';
+  var hitRatePct  = inputTokens > 0 ? (hitTokens  / inputTokens * 100).toFixed(1) : '0.0';
   var missRatePct = inputTokens > 0 ? (missTokens / inputTokens * 100).toFixed(1) : '0.0';
 
-  // Find max cost in history
-  var maxCost = 0;
-  var maxCostModel = '暂无数据';
+  var maxCost = 0, maxCostModel = '暂无数据', minCost = 999999, minCostModel = '暂无数据';
+  var maxTurnTok = 0, maxTTIn = 0, maxTTOut = 0, minTurnTok = 999999, minTTIn = 0, minTTOut = 0;
   if (s.history && s.history.length > 0) {
     s.history.forEach(function (item) {
       var c = item.cost || 0;
-      if (c > maxCost) {
-        maxCost = c;
-        maxCostModel = item.model || '未知模型';
-      }
-    });
-  }
-
-  // Set text content for new cards
-  if (el('ds-stat-total-tokens')) el('ds-stat-total-tokens').textContent = formatTokens(totalTokens);
-  if (el('ds-stat-total-tokens-sub')) el('ds-stat-total-tokens-sub').textContent = '单轮平均 ' + formatTokens(avgTotalTokens);
-
-  if (el('ds-stat-hit-tokens')) el('ds-stat-hit-tokens').textContent = formatTokens(hitTokens);
-  if (el('ds-stat-hit-tokens-sub')) el('ds-stat-hit-tokens-sub').textContent = '占输入 ' + hitRatePct + '%';
-
-  if (el('ds-stat-miss-tokens')) el('ds-stat-miss-tokens').textContent = formatTokens(missTokens);
-  if (el('ds-stat-miss-tokens-sub')) el('ds-stat-miss-tokens-sub').textContent = '占输入 ' + missRatePct + '%';
-
-  if (el('ds-stat-rounds-count')) el('ds-stat-rounds-count').textContent = roundsCount;
-  if (el('ds-stat-rounds-count-sub')) el('ds-stat-rounds-count-sub').textContent = '轮对话';
-
-  if (el('ds-stat-max-turn-cost')) el('ds-stat-max-turn-cost').textContent = '¥' + maxCost.toFixed(4);
-  if (el('ds-stat-max-turn-cost-sub')) el('ds-stat-max-turn-cost-sub').textContent = maxCostModel;
-
-  if (el('ds-stat-avg-turn-tokens')) el('ds-stat-avg-turn-tokens').textContent = formatTokens(avgTotalTokens);
-  if (el('ds-stat-avg-turn-tokens-sub')) el('ds-stat-avg-turn-tokens-sub').textContent = '输 ' + formatTokens(avgInputTokens) + ' · 出 ' + formatTokens(avgOutputTokens);
-
-  // Latest hit rate
-  var latestHitRateVal = '-';
-  var latestHitRateSub = '暂无数据';
-  if (s.history && s.history.length > 0) {
-    var lastRound = s.history[0];
-    latestHitRateVal = lastRound.prompt_tokens > 0 
-      ? (lastRound.cache_hit_tokens / lastRound.prompt_tokens * 100).toFixed(1) + '%' 
-      : '0.0%';
-    latestHitRateSub = lastRound.model || '未知模型';
-  }
-
-  // Hit / Miss ratio
-  var hitMissRatioVal = formatTokens(hitTokens) + ' / ' + formatTokens(missTokens);
-  var hitMissRatioSub = '输出 ' + formatTokens(outputTokens);
-
-  // Average Input Tokens
-  var avgHit = roundsCount > 0 ? Math.round(hitTokens / roundsCount) : 0;
-  var avgMiss = roundsCount > 0 ? Math.round(missTokens / roundsCount) : 0;
-  var avgInputTokensVal = avgInputTokens;
-  var avgInputTokensSub = '命中 ' + formatTokens(avgHit) + ' · 未命中 ' + formatTokens(avgMiss);
-
-  // Average Output Tokens
-  var avgOutputTokensVal = avgOutputTokens;
-  var avgOutputPct = avgTotalTokens > 0 ? (avgOutputTokens / avgTotalTokens * 100).toFixed(1) : '0.0';
-  var avgOutputTokensSub = '占总数 ' + avgOutputPct + '%';
-
-  // Savings rate
-  var totalPotentialCost = (s.total_cost || 0) + sv;
-  var savingsRateVal = totalPotentialCost > 0 ? (sv / totalPotentialCost * 100).toFixed(1) + '%' : '0.0%';
-  var savingsRateSub = '节省 ¥' + sv.toFixed(4);
-
-  // Min turn cost, max/min turn tokens
-  var minCost = 999999;
-  var minCostModel = '暂无数据';
-  var maxTurnTok = 0;
-  var maxTurnTokInput = 0;
-  var maxTurnTokOutput = 0;
-  var minTurnTok = 999999;
-  var minTurnTokInput = 0;
-  var minTurnTokOutput = 0;
-
-  if (s.history && s.history.length > 0) {
-    s.history.forEach(function (item) {
-      var c = item.cost || 0;
-      if (c < minCost) {
-        minCost = c;
-        minCostModel = item.model || '未知模型';
-      }
+      if (c > maxCost)  { maxCost = c; maxCostModel = item.model || '未知模型'; }
+      if (c < minCost)  { minCost = c; minCostModel = item.model || '未知模型'; }
       var t = item.total_tokens || 0;
-      if (t > maxTurnTok) {
-        maxTurnTok = t;
-        maxTurnTokInput = item.prompt_tokens || 0;
-        maxTurnTokOutput = item.completion_tokens || 0;
-      }
-      if (t < minTurnTok) {
-        minTurnTok = t;
-        minTurnTokInput = item.prompt_tokens || 0;
-        minTurnTokOutput = item.completion_tokens || 0;
-      }
+      if (t > maxTurnTok) { maxTurnTok = t; maxTTIn = item.prompt_tokens || 0; maxTTOut = item.completion_tokens || 0; }
+      if (t < minTurnTok) { minTurnTok = t; minTTIn = item.prompt_tokens || 0; minTTOut = item.completion_tokens || 0; }
     });
   }
   if (minCost === 999999) minCost = 0;
   if (minTurnTok === 999999) minTurnTok = 0;
 
-  var minCostVal = '¥' + minCost.toFixed(4);
-  var minCostSub = minCostModel;
+  if (el('ds-stat-total-tokens'))     el('ds-stat-total-tokens').textContent     = formatTokens(totalTokens);
+  if (el('ds-stat-total-tokens-sub')) el('ds-stat-total-tokens-sub').textContent = '单轮平均 ' + formatTokens(avgTotalTokens);
+  if (el('ds-stat-hit-tokens'))       el('ds-stat-hit-tokens').textContent       = formatTokens(hitTokens);
+  if (el('ds-stat-hit-tokens-sub'))   el('ds-stat-hit-tokens-sub').textContent   = '占输入 ' + hitRatePct + '%';
+  if (el('ds-stat-miss-tokens'))      el('ds-stat-miss-tokens').textContent      = formatTokens(missTokens);
+  if (el('ds-stat-miss-tokens-sub'))  el('ds-stat-miss-tokens-sub').textContent  = '占输入 ' + missRatePct + '%';
+  if (el('ds-stat-rounds-count'))     el('ds-stat-rounds-count').textContent     = roundsCount;
+  if (el('ds-stat-rounds-count-sub')) el('ds-stat-rounds-count-sub').textContent = '轮对话';
+  if (el('ds-stat-max-turn-cost'))    el('ds-stat-max-turn-cost').textContent    = '¥' + maxCost.toFixed(4);
+  if (el('ds-stat-max-turn-cost-sub'))el('ds-stat-max-turn-cost-sub').textContent= maxCostModel;
+  if (el('ds-stat-avg-turn-tokens'))  el('ds-stat-avg-turn-tokens').textContent  = formatTokens(avgTotalTokens);
+  if (el('ds-stat-avg-turn-tokens-sub'))el('ds-stat-avg-turn-tokens-sub').textContent = '输 ' + formatTokens(avgInputTokens) + ' · 出 ' + formatTokens(avgOutputTokens);
 
-  var maxTurnTokVal = maxTurnTok;
-  var maxTurnTokSub = '输 ' + formatTokens(maxTurnTokInput) + ' · 出 ' + formatTokens(maxTurnTokOutput);
+  // Latest hit rate
+  var lhrVal = '-', lhrSub = '暂无数据';
+  if (s.history && s.history.length > 0) {
+    var lr = s.history[0];
+    lhrVal = lr.prompt_tokens > 0 ? (lr.cache_hit_tokens / lr.prompt_tokens * 100).toFixed(1) + '%' : '0.0%';
+    lhrSub = lr.model || '未知模型';
+  }
+  if (el('ds-stat-latest-hit-rate'))     el('ds-stat-latest-hit-rate').textContent     = lhrVal;
+  if (el('ds-stat-latest-hit-rate-sub')) el('ds-stat-latest-hit-rate-sub').textContent = lhrSub;
 
-  var minTurnTokVal = minTurnTok;
-  var minTurnTokSub = '输 ' + formatTokens(minTurnTokInput) + ' · 出 ' + formatTokens(minTurnTokOutput);
-
-  // Set text content for new cards
-  if (el('ds-stat-latest-hit-rate')) el('ds-stat-latest-hit-rate').textContent = latestHitRateVal;
-  if (el('ds-stat-latest-hit-rate-sub')) el('ds-stat-latest-hit-rate-sub').textContent = latestHitRateSub;
-
-  if (el('ds-stat-hit-miss-ratio')) el('ds-stat-hit-miss-ratio').textContent = hitMissRatioVal;
-  if (el('ds-stat-hit-miss-ratio-sub')) el('ds-stat-hit-miss-ratio-sub').textContent = hitMissRatioSub;
-
-  // Update visual hit-miss ratio bar
+  // Hit/miss ratio bar
   var totalInput = hitTokens + missTokens;
-  var hitPct = totalInput > 0 ? (hitTokens / totalInput * 100) : 0;
+  var hitPct  = totalInput > 0 ? (hitTokens / totalInput * 100) : 0;
   var missPct = totalInput > 0 ? (missTokens / totalInput * 100) : 0;
-  var hitBarEl = el('ds-hit-miss-bar-hit');
-  var missBarEl = el('ds-hit-miss-bar-miss');
-  var hitLblEl = el('ds-hit-miss-lbl-hit');
-  var missLblEl = el('ds-hit-miss-lbl-miss');
-  if (hitBarEl) hitBarEl.style.width = hitPct.toFixed(1) + '%';
+  if (el('ds-stat-hit-miss-ratio'))     el('ds-stat-hit-miss-ratio').textContent     = formatTokens(hitTokens) + ' / ' + formatTokens(missTokens);
+  if (el('ds-stat-hit-miss-ratio-sub')) el('ds-stat-hit-miss-ratio-sub').textContent = '输出 ' + formatTokens(outputTokens);
+  var hitBarEl = el('ds-hit-miss-bar-hit'), missBarEl = el('ds-hit-miss-bar-miss');
+  var hitLblEl = el('ds-hit-miss-lbl-hit'), missLblEl = el('ds-hit-miss-lbl-miss');
+  if (hitBarEl)  hitBarEl.style.width  = hitPct.toFixed(1) + '%';
   if (missBarEl) missBarEl.style.width = (totalInput > 0 ? (100 - hitPct) : 0).toFixed(1) + '%';
-  if (hitLblEl) hitLblEl.textContent = '命中: ' + hitPct.toFixed(1) + '%';
+  if (hitLblEl)  hitLblEl.textContent  = '命中: ' + hitPct.toFixed(1) + '%';
   if (missLblEl) missLblEl.textContent = '未命中: ' + missPct.toFixed(1) + '%';
 
-  if (el('ds-stat-avg-input-tokens')) el('ds-stat-avg-input-tokens').textContent = formatTokens(avgInputTokensVal);
-  if (el('ds-stat-avg-input-tokens-sub')) el('ds-stat-avg-input-tokens-sub').textContent = avgInputTokensSub;
+  // Avg input/output tokens
+  var avgHit  = roundsCount > 0 ? Math.round(hitTokens  / roundsCount) : 0;
+  var avgMiss = roundsCount > 0 ? Math.round(missTokens / roundsCount) : 0;
+  if (el('ds-stat-avg-input-tokens'))     el('ds-stat-avg-input-tokens').textContent     = formatTokens(avgInputTokens);
+  if (el('ds-stat-avg-input-tokens-sub')) el('ds-stat-avg-input-tokens-sub').textContent = '命中 ' + formatTokens(avgHit) + ' · 未命中 ' + formatTokens(avgMiss);
+  var avgOutPct = avgTotalTokens > 0 ? (avgOutputTokens / avgTotalTokens * 100).toFixed(1) : '0.0';
+  if (el('ds-stat-avg-output-tokens'))     el('ds-stat-avg-output-tokens').textContent     = formatTokens(avgOutputTokens);
+  if (el('ds-stat-avg-output-tokens-sub')) el('ds-stat-avg-output-tokens-sub').textContent = '占总数 ' + avgOutPct + '%';
 
-  if (el('ds-stat-avg-output-tokens')) el('ds-stat-avg-output-tokens').textContent = formatTokens(avgOutputTokensVal);
-  if (el('ds-stat-avg-output-tokens-sub')) el('ds-stat-avg-output-tokens-sub').textContent = avgOutputTokensSub;
+  // Savings rate
+  var totalPotentialCost = (s.total_cost || 0) + sv;
+  var savingsRateVal = totalPotentialCost > 0 ? (sv / totalPotentialCost * 100).toFixed(1) + '%' : '0.0%';
+  if (el('ds-stat-savings-rate'))     el('ds-stat-savings-rate').textContent     = savingsRateVal;
+  if (el('ds-stat-savings-rate-sub')) el('ds-stat-savings-rate-sub').textContent = '节省 ¥' + sv.toFixed(4);
 
-  if (el('ds-stat-savings-rate')) el('ds-stat-savings-rate').textContent = savingsRateVal;
-  if (el('ds-stat-savings-rate-sub')) el('ds-stat-savings-rate-sub').textContent = savingsRateSub;
+  // Min turn cost
+  if (el('ds-stat-min-turn-cost'))     el('ds-stat-min-turn-cost').textContent     = '¥' + minCost.toFixed(4);
+  if (el('ds-stat-min-turn-cost-sub')) el('ds-stat-min-turn-cost-sub').textContent = minCostModel;
 
-  if (el('ds-stat-min-turn-cost')) el('ds-stat-min-turn-cost').textContent = minCostVal;
-  if (el('ds-stat-min-turn-cost-sub')) el('ds-stat-min-turn-cost-sub').textContent = minCostSub;
+  // Max/min turn tokens
+  if (el('ds-stat-max-turn-tokens'))     el('ds-stat-max-turn-tokens').textContent     = formatTokens(maxTurnTok);
+  if (el('ds-stat-max-turn-tokens-sub')) el('ds-stat-max-turn-tokens-sub').textContent = '输 ' + formatTokens(maxTTIn) + ' · 出 ' + formatTokens(maxTTOut);
+  if (el('ds-stat-min-turn-tokens'))     el('ds-stat-min-turn-tokens').textContent     = formatTokens(minTurnTok);
+  if (el('ds-stat-min-turn-tokens-sub')) el('ds-stat-min-turn-tokens-sub').textContent = '输 ' + formatTokens(minTTIn) + ' · 出 ' + formatTokens(minTTOut);
 
-  if (el('ds-stat-max-turn-tokens')) el('ds-stat-max-turn-tokens').textContent = formatTokens(maxTurnTokVal);
-  if (el('ds-stat-max-turn-tokens-sub')) el('ds-stat-max-turn-tokens-sub').textContent = maxTurnTokSub;
-
-  if (el('ds-stat-min-turn-tokens')) el('ds-stat-min-turn-tokens').textContent = formatTokens(minTurnTokVal);
-  if (el('ds-stat-min-turn-tokens-sub')) el('ds-stat-min-turn-tokens-sub').textContent = minTurnTokSub;
-
-  // Balance display
-  var beEl = el('ds-balance');
-  if (beEl) {
-    if (state.customBalance !== null && state.customBalance !== '') {
-      beEl.textContent = '¥' + parseFloat(state.customBalance).toFixed(2) + ' CNY';
-    } else if (state.balance && state.balance.balance != null) {
-      beEl.textContent = '¥' + parseFloat(state.balance.balance).toFixed(2) + ' ' + state.balance.currency;
-    } else {
-      beEl.textContent = '¥0.00 CNY';
-    }
-  }
-
-  // Remaining rounds estimate
-  var remEl = el('ds-balance-remaining');
-  if (remEl) {
-    var r = calculateRemainingRounds(s);
-    remEl.textContent = r !== null ? '预计还可进行 ' + r + ' 轮对话' : '';
-  }
-
-  // ── Latest entry ──────────────────────────────────────────────────────────
+  // ── Latest entry ────────────────────────────────────────────────────────────
   var latestEl = el('ds-latest');
   if (s.history && s.history.length > 0 && latestEl) {
     var u  = s.history[0];
     var hr = u.prompt_tokens > 0 ? (u.cache_hit_tokens / u.prompt_tokens * 100).toFixed(1) : '0.0';
-    latestEl.innerHTML = buildEntryHTML(u, hr, true);
+    latestEl.innerHTML = buildEntryHTML(u, hr);
   } else if (latestEl) {
     latestEl.innerHTML = '<div class="ds-wait-text">等待第一次对话...</div>';
   }
 
-  // ── History list ──────────────────────────────────────────────────────────
+  // ── History list ────────────────────────────────────────────────────────────
   var histEl = el('ds-history');
   if (s.history && s.history.length > 1 && histEl) {
-    // Check if it was previously expanded
     var isExpanded = histEl.getAttribute('data-expanded') === 'true';
     histEl.setAttribute('data-expanded', isExpanded ? 'true' : 'false');
-    if (isExpanded) {
-      histEl.classList.remove('ds-folded');
-    } else {
-      histEl.classList.add('ds-folded');
-    }
+    if (isExpanded) histEl.classList.remove('ds-folded'); else histEl.classList.add('ds-folded');
 
-    // Only render the most recent 20 items in the DOM
     var itemsHTML = s.history.slice(1, 21).map(function (item, idx) {
       var t  = new Date(item.timestamp).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
       var hr = item.prompt_tokens > 0 ? (item.cache_hit_tokens / item.prompt_tokens * 100) : 0;
-      
-      // Default hide items from index 3 onwards (the 4th item or later)
       var extraClass = idx >= 3 ? ' ds-history-collapsed' : '';
       return buildHistoryEntryHTML(item, idx, s.history.length, t, hr, extraClass);
     }).join('');
 
-    // If there are more than 3 items, append a toggle button
     if (s.history.length > 4) {
       var toggleText = isExpanded ? '收起历史记录' : '展开更多 (最多显示20条)...';
-      itemsHTML += '<div id="ds-history-toggle" style="text-align: center; padding: 8px; cursor: pointer; color: var(--SmartThemeUnderlineColor, #818cf8); font-size: 12px; font-weight: 500; text-decoration: underline;">' + toggleText + '</div>';
+      itemsHTML += '<div id="ds-history-toggle" style="text-align:center;padding:8px;cursor:pointer;color:var(--SmartThemeUnderlineColor,#818cf8);font-size:12px;font-weight:500;text-decoration:underline;">' + toggleText + '</div>';
     }
-
     histEl.innerHTML = itemsHTML;
   } else if (histEl) {
     histEl.innerHTML = '<div class="ds-wait-text">暂无历史记录</div>';
   }
 
-  // ── Diff display ──────────────────────────────────────────────────────────
+  // ── Diff ────────────────────────────────────────────────────────────────────
   var diffEl = el('ds-diff');
   if (diffEl) {
     if (!selectedBeforeId || !selectedAfterId) {
-      diffEl.innerHTML = '<div class="ds-wait-text">请在下方历史记录中选择“旧请求”和“新请求”进行对比</div>';
+      diffEl.innerHTML = '<div class="ds-wait-text">请在下方历史记录中选择"旧请求"和"新请求"进行对比</div>';
     } else {
-      var beforeRecord = null;
-      var afterRecord = null;
-      if (s.history && s.history.length > 0) {
+      var beforeRecord = null, afterRecord = null;
+      if (s.history) {
         s.history.forEach(function (item) {
           if (item.timestamp === selectedBeforeId) beforeRecord = item;
-          if (item.timestamp === selectedAfterId) afterRecord = item;
+          if (item.timestamp === selectedAfterId)  afterRecord  = item;
         });
       }
       if (!beforeRecord || !afterRecord) {
         diffEl.innerHTML = '<div class="ds-wait-text">所选记录的快照已过期或不存在</div>';
       } else {
         var diffResult = comparePromptRecords(beforeRecord, afterRecord, 600);
-        var html = '';
-        html += '<div class="ds-diff-summary ds-diff-kind-' + diffResult.kind + '" style="margin-bottom:12px;">';
-        html += '<strong>对比结论: </strong>' + escapeHTML(diffResult.summary);
-        html += '</div>';
-
+        var html = '<div class="ds-diff-summary ds-diff-kind-' + diffResult.kind + '" style="margin-bottom:12px;"><strong>对比结论: </strong>' + escapeHTML(diffResult.summary) + '</div>';
         if (diffResult.context) {
           var ctx = diffResult.context;
-          var formatDiffText = function (prefix, changed, suffix, hasMorePrefix, hasMoreSuffix, isDeletion) {
-            var text = '';
-            if (hasMorePrefix) text += '<span class="ds-diff-context-dim">…</span>';
-            text += '<span class="ds-diff-context-normal">' + escapeHTML(prefix) + '</span>';
-            if (changed) {
-              text += '<mark class="' + (isDeletion ? 'ds-diff-del' : 'ds-diff-ins') + '">' + escapeHTML(changed) + '</mark>';
-            } else {
-              text += '<mark class="' + (isDeletion ? 'ds-diff-del' : 'ds-diff-ins') + '">∅</mark>';
-            }
-            text += '<span class="ds-diff-context-normal">' + escapeHTML(suffix) + '</span>';
-            if (hasMoreSuffix) text += '<span class="ds-diff-context-dim">…</span>';
-            return text;
+          var fdt = function (prefix, changed, suffix, hmp, hms, isDel) {
+            var t2 = '';
+            if (hmp) t2 += '<span class="ds-diff-context-dim">…</span>';
+            t2 += '<span class="ds-diff-context-normal">' + escapeHTML(prefix) + '</span>';
+            t2 += '<mark class="' + (isDel ? 'ds-diff-del' : 'ds-diff-ins') + '">' + (changed ? escapeHTML(changed) : '∅') + '</mark>';
+            t2 += '<span class="ds-diff-context-normal">' + escapeHTML(suffix) + '</span>';
+            if (hms) t2 += '<span class="ds-diff-context-dim">…</span>';
+            return t2;
           };
-
-          var beforeSideText = formatDiffText(ctx.prefix, ctx.beforeChanged, ctx.suffix, ctx.hasMorePrefix, ctx.hasMoreSuffix, true);
-          var afterSideText = formatDiffText(ctx.prefix, ctx.afterChanged, ctx.suffix, ctx.hasMorePrefix, ctx.hasMoreSuffix, false);
-
           html += '<div class="ds-diff-grid">';
-
-          html += '<div class="ds-diff-side">';
-          html += '<div class="ds-diff-side-title">旧请求 · ' + beforeRecord.prompt_tokens + ' tokens (' + diffResult.beforeLength + ' 字)</div>';
-          html += '<pre class="ds-diff-pre">' + beforeSideText + '</pre>';
+          html += '<div class="ds-diff-side"><div class="ds-diff-side-title">旧请求 · ' + beforeRecord.prompt_tokens + ' tokens (' + diffResult.beforeLength + ' 字)</div>' +
+                  '<pre class="ds-diff-pre">' + fdt(ctx.prefix, ctx.beforeChanged, ctx.suffix, ctx.hasMorePrefix, ctx.hasMoreSuffix, true) + '</pre></div>';
+          html += '<div class="ds-diff-side"><div class="ds-diff-side-title">新请求 · ' + afterRecord.prompt_tokens + ' tokens (' + diffResult.afterLength + ' 字)</div>' +
+                  '<pre class="ds-diff-pre">' + fdt(ctx.prefix, ctx.afterChanged, ctx.suffix, ctx.hasMorePrefix, ctx.hasMoreSuffix, false) + '</pre></div>';
           html += '</div>';
-
-          html += '<div class="ds-diff-side">';
-          html += '<div class="ds-diff-side-title">新请求 · ' + afterRecord.prompt_tokens + ' tokens (' + diffResult.afterLength + ' 字)</div>';
-          html += '<pre class="ds-diff-pre">' + afterSideText + '</pre>';
-          html += '</div>';
-
-          html += '</div>'; // ds-diff-grid
         } else {
           html += '<div class="ds-wait-text">没有发现有效消息内容的差异。</div>';
         }
@@ -2899,37 +2538,40 @@ function _doRefreshUI() {
   }
 }
 
-// ─── HTML builders (extracted to reduce repetition) ──────────────────────────
+// ─── HTML Builders ────────────────────────────────────────────────────────────
 function getPricingBadge(u) {
   var type = u.pricingType;
-  if (!type) {
-    var useNew = state.settings.useNewPricing;
-    if (useNew && state.settings.newPricingDate && u.timestamp >= state.settings.newPricingDate) {
-      type = isPeakHour(u.timestamp) ? 'peak' : 'offpeak';
-    } else {
-      type = 'legacy';
-    }
-  }
   if (type === 'peak') {
     return '<span style="font-size:9px;padding:1px 5px;border-radius:3px;color:var(--SmartThemeQuoteColor);border:1px solid var(--SmartThemeQuoteColor);font-weight:600;margin-left:4px;">高峰</span>';
   }
   if (type === 'offpeak') {
     return '<span style="font-size:9px;padding:1px 5px;border-radius:3px;color:var(--SmartThemeQuoteColor);border:1px solid var(--SmartThemeQuoteColor);font-weight:600;margin-left:4px;">平时</span>';
   }
+  if (type === 'unknown') {
+    return '<span style="font-size:9px;padding:1px 5px;border-radius:3px;color:#f97316;border:1px solid #f97316;font-weight:600;margin-left:4px;">外部渠道</span>';
+  }
   return '';
 }
 
+function getChannelBadge(u) {
+  if (!u.channelName || u.pricingType === 'unknown') return '';
+  var ch = getChannelById(u.channelId);
+  var color = ch ? escapeHTML(ch.color || '#6366f1') : '#6366f1';
+  return '<span style="font-size:9px;padding:1px 5px;border-radius:3px;border:1px solid ' + color + ';color:' + color + ';font-weight:500;margin-left:4px;">' + escapeHTML(u.channelName) + '</span>';
+}
+
 function _buildEntryBodyHTML(u, hitRate, diffBtns) {
+  var isUnknown = u.pricingType === 'unknown';
+  var costText  = isUnknown ? '<span style="color:#f97316;font-size:11px;">¥-- (无定价)</span>' : '<span style="font-size:13px;color:var(--SmartThemeBodyColor);font-weight:600;">¥' + (u.cost ? u.cost.toFixed(4) : '0.0000') + '</span>';
   var hasSnapshot = u.messages && u.messages.length > 0;
   return '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">' +
-      '<div style="display:flex;align-items:center;gap:8px">' +
+      '<div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap;">' +
         diffBtns.title +
-        '<span style="font-size:10px;padding:2px 7px;border-radius:4px;background:var(--SmartThemeBorderColor);color:var(--SmartThemeBodyColor);font-weight:500">' +
-          escapeHTML(u.model) + '</span>' +
+        '<span style="font-size:10px;padding:2px 7px;border-radius:4px;background:var(--SmartThemeBorderColor);color:var(--SmartThemeBodyColor);font-weight:500">' + escapeHTML(u.model) + '</span>' +
         getPricingBadge(u) +
+        getChannelBadge(u) +
       '</div>' +
-      '<span style="font-size:13px;color:var(--SmartThemeBodyColor);font-weight:600">¥' +
-        (u.cost ? u.cost.toFixed(4) : '0.0000') + '</span>' +
+      costText +
     '</div>' +
     '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">' +
       buildTokenCell('tokens', 'var(--SmartThemeEmColor)',          '16px', u.total_tokens)      +
@@ -2939,12 +2581,12 @@ function _buildEntryBodyHTML(u, hitRate, diffBtns) {
     buildHitBar(hitRate) +
     '<div style="display:flex;justify-content:space-between;align-items:center">' +
       '<span style="font-size:10px;color:var(--SmartThemeQuoteColor);font-weight:500">' + parseFloat(hitRate).toFixed(1) + '% 命中</span>' +
-      '<span style="font-size:10px;color:var(--SmartThemeEmColor)">¥' +
-        (u.input_cost  ? u.input_cost.toFixed(4)  : '0.0000') + ' 输入 · ¥' +
-        (u.output_cost ? u.output_cost.toFixed(4) : '0.0000') + ' 输出</span>' +
+      (isUnknown
+        ? '<span style="font-size:10px;color:#f97316;">外部渠道 · 不计费用</span>'
+        : '<span style="font-size:10px;color:var(--SmartThemeEmColor)">¥' + (u.input_cost ? u.input_cost.toFixed(4) : '0.0000') + ' 输入 · ¥' + (u.output_cost ? u.output_cost.toFixed(4) : '0.0000') + ' 输出</span>') +
     '</div>' +
     (hasSnapshot ?
-      '<div style="display:flex; gap:6px; margin-top:8px; justify-content: flex-end;">' +
+      '<div style="display:flex;gap:6px;margin-top:8px;justify-content:flex-end;">' +
         '<button class="ds-diff-btn ds-diff-before-btn' + (u.timestamp === selectedBeforeId ? ' active' : '') + '" data-timestamp="' + u.timestamp + '">旧</button>' +
         '<button class="ds-diff-btn ds-diff-after-btn'  + (u.timestamp === selectedAfterId  ? ' active' : '') + '" data-timestamp="' + u.timestamp + '">新</button>' +
       '</div>' : '');
@@ -2953,61 +2595,37 @@ function _buildEntryBodyHTML(u, hitRate, diffBtns) {
 function buildEntryHTML(u, hitRate) {
   var time = new Date(u.timestamp).toLocaleTimeString('zh-CN');
   return '<div style="padding:12px;font-family:system-ui,-apple-system,sans-serif">' +
-    _buildEntryBodyHTML(u, hitRate, {
-      title: '<span style="font-size:11px;color:var(--SmartThemeEmColor);font-weight:500">' + time + '</span>'
-    }) +
+    _buildEntryBodyHTML(u, hitRate, { title: '<span style="font-size:11px;color:var(--SmartThemeEmColor);font-weight:500">' + time + '</span>' }) +
   '</div>';
 }
 
 function buildHistoryEntryHTML(item, idx, totalLen, timeStr, hitRate, extraClass) {
   var roundNum = totalLen - 1 - idx;
-  var cls = 'ds-card' + (extraClass || '');
-  return '<div class="' + cls + '" style="padding:12px;margin-bottom:8px;font-family:system-ui,-apple-system,sans-serif">' +
-    _buildEntryBodyHTML(item, hitRate, {
-      title: '<span style="font-size:11px;color:var(--SmartThemeEmColor);font-weight:500">#' + roundNum + ' · ' + timeStr + '</span>'
-    }) +
+  return '<div class="ds-card' + (extraClass || '') + '" style="padding:12px;margin-bottom:8px;font-family:system-ui,-apple-system,sans-serif">' +
+    _buildEntryBodyHTML(item, hitRate, { title: '<span style="font-size:11px;color:var(--SmartThemeEmColor);font-weight:500">#' + roundNum + ' · ' + timeStr + '</span>' }) +
   '</div>';
 }
 
 function buildTokenCell(label, color, fontSize, value) {
   return '<div style="text-align:center">' +
     '<div style="font-size:10px;color:' + color + ';margin-bottom:2px">' + label + '</div>' +
-    '<div style="font-size:' + fontSize + ';font-weight:700;color:' + color + '">' +
-      String(value || 0) + '</div>' +
+    '<div style="font-size:' + fontSize + ';font-weight:700;color:' + color + '">' + String(value || 0) + '</div>' +
   '</div>';
 }
 
 function buildHitBar(pct) {
   var width = Math.min(100, Math.max(0, parseFloat(pct) || 0));
   return '<div style="background:rgba(0,0,0,0.15);border-radius:4px;height:4px;overflow:hidden;margin-bottom:4px">' +
-    '<div style="background:linear-gradient(90deg, var(--SmartThemeQuoteColor), var(--SmartThemeUnderlineColor));width:' + width +
-      '%;height:100%;border-radius:4px;transition:width 0.3s"></div>' +
+    '<div style="background:linear-gradient(90deg,var(--SmartThemeQuoteColor),var(--SmartThemeUnderlineColor));width:' + width + '%;height:100%;border-radius:4px;transition:width 0.3s"></div>' +
   '</div>';
 }
 
-function formatTokens(val) {
-  var num = parseFloat(val) || 0;
-  if (num >= 10000) return (num / 10000).toFixed(1) + '万';
-  if (num >= 1000)  return (num / 1000).toFixed(1) + 'k';
-  return String(Math.round(num));
-}
-
-// Prevent XSS when model names are interpolated into innerHTML
-function escapeHTML(str) {
-  return String(str || '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-}
-
-// ─── Extension entry-point ────────────────────────────────────────────────────
+// ─── Extension Entry-Point ────────────────────────────────────────────────────
 export async function init() {
   await migrateLocalStorageToIndexedDB();
   await loadSavedData();
+  initDefaultChannels();
   await loadCurrentSave();
-  
-  // Align current character save on init
   await handleChatChanged();
 
   setupEvents();
@@ -3018,21 +2636,16 @@ export async function init() {
   isInitDone      = true;
   syncViewportHeight();
 
-  // Register entry in SillyTavern Extensions menu
+  // Register in SillyTavern Extensions menu
   try {
     var wp   = window.parent || window;
     var wdoc = wp.document;
     var menu = wdoc.getElementById('extensionsMenu');
     if (menu && !wdoc.getElementById('ds_wand_container')) {
-      var container = wdoc.createElement('div');
-      container.id        = 'ds_wand_container';
-      container.className = 'extension_container';
-      container.innerHTML =
-        '<div id="ds_wand_entry" class="list-group-item flex-container flexGap5">' +
-          '<div class="fa-solid fa-wallet extensionsMenuExtensionButton"></div>' +
-          '钱包' +
-        '</div>';
-      menu.appendChild(container);
+      var container2 = wdoc.createElement('div');
+      container2.id = 'ds_wand_container'; container2.className = 'extension_container';
+      container2.innerHTML = '<div id="ds_wand_entry" class="list-group-item flex-container flexGap5"><div class="fa-solid fa-wallet extensionsMenuExtensionButton"></div>钱包</div>';
+      menu.appendChild(container2);
       var wandBtn = wdoc.getElementById('ds_wand_entry');
       if (wandBtn) wandBtn.addEventListener('click', togglePanel);
     }
@@ -3042,20 +2655,20 @@ export async function init() {
   initWalletButtonObserver();
   setTimeout(ensureWalletButton, 1000);
 
-  // Viewport height sync
+  // Viewport sync
   try {
-    var p = window.parent || window;
-    if (p.visualViewport) {
-      p.visualViewport.addEventListener('resize', syncViewportHeight, { passive: true });
-      p.visualViewport.addEventListener('scroll', syncViewportHeight, { passive: true });
+    var p2 = window.parent || window;
+    if (p2.visualViewport) {
+      p2.visualViewport.addEventListener('resize', syncViewportHeight, { passive: true });
+      p2.visualViewport.addEventListener('scroll', syncViewportHeight, { passive: true });
     }
-    p.addEventListener('resize', syncViewportHeight, { passive: true });
+    p2.addEventListener('resize', syncViewportHeight, { passive: true });
   } catch (e) {}
 
-  // Responsive layout class guard (suppress animation on breakpoint switch)
+  // Responsive layout guard
   try {
-    var pw  = window.parent || window;
-    var vw  = (pw.innerWidth || 768) > 760 ? 'desktop' : 'mobile';
+    var pw = window.parent || window;
+    var vw = (pw.innerWidth || 768) > 760 ? 'desktop' : 'mobile';
     pw.addEventListener('resize', function () {
       var nv = (pw.innerWidth || 768) > 760 ? 'desktop' : 'mobile';
       if (vw !== nv) {
@@ -3075,5 +2688,5 @@ window.DeepSeekStats = {
   state:        state,
   togglePanel:  togglePanel,
   refreshUI:    refreshUI,
-  queryBalance: queryBalance,
+  getChannels:  getChannels,
 };
