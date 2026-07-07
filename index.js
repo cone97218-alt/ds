@@ -1,6 +1,8 @@
 import { eventSource, event_types } from '../../../../script.js';
 import { getContext } from '../../../extensions.js';
-import { SECRET_KEYS, secret_state } from '../../../secrets.js';
+
+var local_secret_state = null;
+var local_SECRET_KEYS = null;
 
 // ─── DS Default Pricing Rules (reference data for default channel) ─────────────
 var DS_DEFAULT_RULES = [
@@ -124,6 +126,20 @@ var _mergedStatsCacheKey = '';
 var _saveSelectHash    = '';
 var _docClickListener  = null;
 var processedRequestIds = [];
+
+var debugLogs = [];
+function logDebug(msg) {
+  var time = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+  debugLogs.push('[' + time + '] ' + msg);
+  if (debugLogs.length > 20) debugLogs.shift();
+  try {
+    var doc = getDoc();
+    var el = doc.getElementById('ds-debug-log-content');
+    if (el) {
+      el.textContent = debugLogs.join('\n');
+    }
+  } catch (e) {}
+}
 
 // ─── Storage keys ─────────────────────────────────────────────────────────────
 var TARGET_API            = '/api/backends/chat-completions/generate';
@@ -846,10 +862,20 @@ function getActiveAPIKey(source) {
   if (!source) return '';
   var key = '';
   try {
-    if (SECRET_KEYS && secret_state) {
-      var sKey = SECRET_KEYS[source.toUpperCase()];
-      if (sKey && secret_state[sKey]) {
-        key = secret_state[sKey];
+    if (local_SECRET_KEYS && local_secret_state) {
+      var sKey = local_SECRET_KEYS[source.toUpperCase()];
+      var secrets = local_secret_state[sKey];
+      if (secrets) {
+        if (Array.isArray(secrets)) {
+          var activeSecret = secrets.find(function (s) { return s.active; }) || secrets[0];
+          if (activeSecret) {
+            key = activeSecret.id || activeSecret.value || '';
+          }
+        } else if (typeof secrets === 'string') {
+          key = secrets;
+        } else if (typeof secrets === 'object') {
+          key = secrets.id || secrets.value || '';
+        }
       }
     }
   } catch (e) {}
@@ -885,7 +911,7 @@ function matchChannelForModel(model, timestamp, apiKey) {
             if (rule.peak && rule.offpeak && ch.useNewPricing) {
               var afterDate = !ch.newPricingDate || ts >= ch.newPricingDate;
               if (afterDate) {
-                var peak = isPeakHour(ts);
+                var peak = isPeakHour(ts, ch);
                 p = peak ? rule.peak : rule.offpeak;
                 pricingType = peak ? 'peak' : 'offpeak';
               } else {
@@ -893,7 +919,7 @@ function matchChannelForModel(model, timestamp, apiKey) {
               }
             } else if (ch.useNewPricing) {
               var afterDate = !ch.newPricingDate || ts >= ch.newPricingDate;
-              if (afterDate && isPeakHour(ts)) {
+              if (afterDate && isPeakHour(ts, ch)) {
                 var isChatOrReasoner = m.indexOf('chat') !== -1 || m.indexOf('reasoner') !== -1;
                 var multiplier = isChatOrReasoner ? 1 : 2;
                 p = { hit: rule.hit * multiplier, miss: rule.miss * multiplier, output: rule.output * multiplier };
@@ -925,7 +951,7 @@ function matchChannelForModel(model, timestamp, apiKey) {
       if (rule.peak && rule.offpeak && ch.useNewPricing) {
         var afterDate = !ch.newPricingDate || ts >= ch.newPricingDate;
         if (afterDate) {
-          var peak = isPeakHour(ts);
+          var peak = isPeakHour(ts, ch);
           p = peak ? rule.peak : rule.offpeak;
           pricingType = peak ? 'peak' : 'offpeak';
         } else {
@@ -933,7 +959,7 @@ function matchChannelForModel(model, timestamp, apiKey) {
         }
       } else if (ch.useNewPricing) {
         var afterDate = !ch.newPricingDate || ts >= ch.newPricingDate;
-        if (afterDate && isPeakHour(ts)) {
+        if (afterDate && isPeakHour(ts, ch)) {
           var isChatOrReasoner = m.indexOf('chat') !== -1 || m.indexOf('reasoner') !== -1;
           var multiplier = isChatOrReasoner ? 1 : 2;
           p = { hit: rule.hit * multiplier, miss: rule.miss * multiplier, output: rule.output * multiplier };
@@ -1038,6 +1064,7 @@ function createTextHash(text) {
 
 // ─── Usage processing ─────────────────────────────────────────────────────────
 async function processUsage(usage, model, isDebug, messages, requestId, apiKey) {
+  logDebug('开始处理用量统计: model=' + model + ', isDebug=' + isDebug);
   var modelName = (model && model.trim()) ? model.trim() : '';
   if (!modelName && !isDebug) { try { modelName = getContext().model || ''; } catch (e) {} }
   if (!modelName) modelName = 'deepseek-v4-flash';
@@ -1055,16 +1082,24 @@ async function processUsage(usage, model, isDebug, messages, requestId, apiKey) 
   var comp  = usage.completion_tokens || 0;
   var total = usage.total_tokens || (hit + miss + comp);
 
+  logDebug('用量详情: hit=' + hit + ', miss=' + miss + ', comp=' + comp + ', total=' + total);
+
   // Deduplication
   if (requestId) {
-    if (processedRequestIds.indexOf(requestId) !== -1) return;
+    if (processedRequestIds.indexOf(requestId) !== -1) {
+      logDebug('检测到重复的 requestId: ' + requestId + ', 略过');
+      return;
+    }
     processedRequestIds.push(requestId);
     if (processedRequestIds.length > 100) processedRequestIds.shift();
   } else {
     var msgSig = (messages && messages.length > 0) ? messages.map(function (m) { return m.hash || ''; }).join(',') : '';
     var signature = msgSig + '_' + hit + '_' + miss + '_' + comp + '_' + modelName;
     var now = Date.now();
-    if (signature === lastProcessedSignature && (now - lastProcessedTime) < 5000) return;
+    if (signature === lastProcessedSignature && (now - lastProcessedTime) < 5000) {
+      logDebug('检测到重复的请求签名, 略过');
+      return;
+    }
     lastProcessedSignature = signature; lastProcessedTime = now;
   }
 
@@ -1076,11 +1111,19 @@ async function processUsage(usage, model, isDebug, messages, requestId, apiKey) 
     completion_tokens: comp,
     total_tokens: total,
   };
-  lu.cost = calcCost(lu, apiKey);
+  try {
+    lu.cost = calcCost(lu, apiKey);
+    logDebug('计费成功: channel=' + lu.cost.channelName + ', total=' + lu.cost.total.toFixed(4) + '元, pricingType=' + lu.cost.pricingType);
+  } catch (e) {
+    logDebug('估算费用发生异常: ' + e.message);
+  }
   state.lastUsage = lu;
 
   var s = getRealCurrentSave();
-  if (!s) return;
+  if (!s) {
+    logDebug('❌ 写入失败: 找不到当前的活跃存档 (currentSave=' + state.currentSave + ', savesKeys=' + Object.keys(state.saves).join(',') + ')');
+    return;
+  }
 
   s.total_tokens      += lu.total_tokens;
   s.total_cost        += lu.cost.total;
@@ -1403,8 +1446,22 @@ function initWalletButtonObserver() {
 
 // ─── Events + Fetch ───────────────────────────────────────────────────────────
 function setupEvents() {
-  eventSource.on(event_types.MESSAGE_RECEIVED, function () { setTimeout(refreshUI, 500); });
-  eventSource.on(event_types.CHAT_CHANGED, function () { setTimeout(handleChatChanged, 500); });
+  logDebug('初始化事件监听中...');
+  import('/scripts/secrets.js').then(function (m) {
+    local_secret_state = m.secret_state;
+    local_SECRET_KEYS = m.SECRET_KEYS;
+    logDebug('secrets.js 动态导入成功');
+  }).catch(function (e) {
+    logDebug('secrets.js 动态导入失败: ' + e.message);
+  });
+  eventSource.on(event_types.MESSAGE_RECEIVED, function () {
+    logDebug('收到消息接收事件 (MESSAGE_RECEIVED)');
+    setTimeout(refreshUI, 500);
+  });
+  eventSource.on(event_types.CHAT_CHANGED, function () {
+    logDebug('收到对话切换事件 (CHAT_CHANGED)');
+    setTimeout(handleChatChanged, 500);
+  });
 }
 
 function patchFetch() {
@@ -1415,58 +1472,86 @@ function patchFetch() {
     var args = arguments;
     var url = typeof args[0] === 'string' ? args[0] : (args[0] && args[0].url);
     if (url && url.indexOf(TARGET_API) !== -1) {
+      logDebug('拦截到 API 请求: ' + url);
       var capturedMessages = null;
+      var req = null;
       try {
         if (args[1] && typeof args[1].body === 'string') {
-          var req = JSON.parse(args[1].body);
+          req = JSON.parse(args[1].body);
           if (req && Array.isArray(req.messages)) {
             capturedMessages = req.messages.map(function (m) {
               var t = m.content || m.text || '';
               return { role: m.role || 'unknown', text: t, length: t.length, hash: createTextHash(t) };
             });
+            logDebug('解析请求体成功, 消息数: ' + capturedMessages.length);
           }
         }
-      } catch (e) {}
+      } catch (e) {
+        logDebug('解析请求体异常: ' + e.message);
+      }
 
       if (state.settings.debug) {
+        logDebug('开启调试模式, 使用假数据生成模拟统计...');
         var fakeUsage = {
           prompt_cache_hit_tokens:  state.settings.debugHit,
           prompt_cache_miss_tokens: state.settings.debugMiss,
           completion_tokens:        state.settings.debugOutput,
           total_tokens: state.settings.debugHit + state.settings.debugMiss + state.settings.debugOutput,
         };
-        setTimeout(function () { processUsage(fakeUsage, state.settings.debugModel, true, capturedMessages, 'debug-' + Date.now()); }, 100);
+        setTimeout(function () { processUsage(fakeUsage, state.settings.debugModel, true, capturedMessages, 'debug-' + Date.now(), ''); }, 100);
         return rawFetch.apply(p, args);
       }
 
+      logDebug('发送真实 Fetch 请求至服务器...');
       return rawFetch.apply(p, args).then(function (res) {
+        logDebug('收到响应, 状态码: ' + res.status);
         var clone = res.clone();
         clone.text().then(function (text) {
           try {
+            logDebug('读取响应体 text 成功 (长度: ' + text.length + ')');
             var data = null, trimmed = text.trim(), resId = '';
             if (trimmed.startsWith('{')) {
               data = JSON.parse(trimmed);
               if (data && data.id) resId = data.id;
+              logDebug('解析非流式 JSON 响应成功');
             } else {
-              text.split('\n').forEach(function (line) {
+              var lines = text.split('\n');
+              logDebug('解析流式 SSE 响应, 总行数: ' + lines.length);
+              lines.forEach(function (line) {
                 if (line.startsWith('data: ') && line !== 'data: [DONE]') {
-                  try { var chunk = JSON.parse(line.substring(6)); if (chunk.id) resId = chunk.id; if (chunk.usage) data = chunk; } catch (e) {}
+                  try {
+                    var chunk = JSON.parse(line.substring(6));
+                    if (chunk.id) resId = chunk.id;
+                    if (chunk.usage) {
+                      data = chunk;
+                      logDebug('SSE 流中提取到 usage 数据');
+                    }
+                  } catch (e) {}
                 }
               });
             }
             if (data && data.usage) {
               var source = req && req.chat_completion_source;
+              logDebug('请求来源 backend: ' + source);
               var apiKey = getActiveAPIKey(source);
+              logDebug('获取当前 backend 的 API 秘钥: ' + (apiKey ? '有 (长度:' + apiKey.length + ')' : '无'));
               processUsage(data.usage, data.model || '', false, capturedMessages, resId, apiKey);
+            } else {
+              logDebug('未匹配到有效的 usage 数据');
             }
-          } catch (e) {}
-        }).catch(function () {});
+          } catch (e) {
+            logDebug('解析响应体出错: ' + e.message);
+          }
+        }).catch(function (e) {
+          logDebug('读取克隆响应 text 失败: ' + e.message);
+        });
         return res;
       });
     }
     return rawFetch.apply(p, args);
   };
   p._ds_fetch_patched = true;
+  logDebug('Fetch hook 挂载完成');
 }
 
 // ─── UI Creation ──────────────────────────────────────────────────────────────
@@ -1548,6 +1633,12 @@ function createUI() {
           '</div>' +
           '<div id="ds-debug-status" style="font-size:10px;color:var(--SmartThemeQuoteColor)"></div>' +
         '</div>' +
+      '</div>' +
+    '</details>' +
+    '<details class="ds-dropdown-section">' +
+      '<summary>运行日志</summary>' +
+      '<div class="ds-dropdown-section-content">' +
+        '<pre id="ds-debug-log-content" style="margin:0;padding:6px;font-family:monospace;font-size:10px;background:rgba(0,0,0,0.2);color:#9ca3af;border-radius:4px;white-space:pre-wrap;word-break:break-all;max-height:150px;overflow-y:auto;user-select:text;"></pre>' +
       '</div>' +
     '</details>' +
     '<div style="margin:8px 0;border-top:1px solid var(--SmartThemeBorderColor,#374151);"></div>' +
@@ -1679,7 +1770,11 @@ function bindUIControls(doc) {
       e.stopPropagation();
       var isOpen = settingsDrop.style.display === 'block';
       settingsDrop.style.display = isOpen ? 'none' : 'block';
-      if (!isOpen) renderChannelManager(doc);
+      if (!isOpen) {
+        renderChannelManager(doc);
+        var logEl = doc.getElementById('ds-debug-log-content');
+        if (logEl) logEl.textContent = debugLogs.join('\n');
+      }
     };
   }
 
@@ -3044,6 +3139,7 @@ function buildHitBar(pct) {
 
 // ─── Extension Entry-Point ────────────────────────────────────────────────────
 export async function init() {
+  logDebug('SillyTavern DeepSeek Extension 初始化中...');
   await migrateLocalStorageToIndexedDB();
   await loadSavedData();
   initDefaultChannels();
