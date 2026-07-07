@@ -556,24 +556,24 @@
 }
 
 .ds-btn-danger {
-    border: 1px solid var(--SmartThemeBotMesBlurTintColor) !important;
-    background: transparent !important;
-    color: var(--SmartThemeBotMesBlurTintColor) !important;
+    border: 1px solid #ef4444 !important;
+    background: rgba(239, 68, 68, 0.1) !important;
+    color: #f87171 !important;
 }
 .ds-btn-danger:hover {
-    background: var(--SmartThemeBotMesBlurTintColor) !important;
-    color: var(--SmartThemeBlurTintColor, #ffffff) !important;
+    background: #ef4444 !important;
+    color: #ffffff !important;
 }
 
 .ds-btn-danger-dark {
-    border: 1px solid var(--SmartThemeBotMesBlurTintColor) !important;
+    border: 1px solid #ef4444 !important;
     background: transparent !important;
-    color: var(--SmartThemeBotMesBlurTintColor) !important;
+    color: #f87171 !important;
     opacity: 0.8;
 }
 .ds-btn-danger-dark:hover {
-    background: var(--SmartThemeBotMesBlurTintColor) !important;
-    color: var(--SmartThemeBlurTintColor, #ffffff) !important;
+    background: #ef4444 !important;
+    color: #ffffff !important;
     opacity: 1;
 }
 

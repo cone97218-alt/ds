@@ -1,5 +1,6 @@
 import { eventSource, event_types } from '../../../../script.js';
 import { getContext } from '../../../extensions.js';
+import { SECRET_KEYS, secret_state } from '../../../secrets.js';
 
 // ─── DS Default Pricing Rules (reference data for default channel) ─────────────
 var DS_DEFAULT_RULES = [
@@ -87,6 +88,7 @@ var DEFAULT_SETTINGS = {
   balanceInterval: 10,
   useNewPricing: false,
   newPricingDate: new Date('2026-07-15T00:00:00+08:00').getTime(),
+  isDsOfficialDeleted: false,
 };
 
 // ─── State ────────────────────────────────────────────────────────────────────
@@ -105,6 +107,7 @@ var state = {
   lastRealSave: '',
   // UI transient state (not persisted):
   activeModelFilter: '__all__',
+  activeChannelFilter: '__all__',
 };
 
 var isInitDone    = false;
@@ -179,6 +182,7 @@ var PANEL_HTML = `
       </div>
     </div>
     <div id="ds-model-filter" class="ds-margin-b-8"></div>
+    <div id="ds-channel-filter" class="ds-margin-b-8"></div>
     <div class="ds-grid-3">
       <div id="ds-stat-card-total-cost" class="ds-card">
         <div class="ds-card-title">总消耗</div>
@@ -648,6 +652,7 @@ function makeNewRuleId() {
 }
 
 function initDefaultChannels() {
+  if (state.settings.isDsOfficialDeleted) return;
   var channels = state.settings.channels;
   if (!Array.isArray(channels)) channels = [];
 
@@ -671,6 +676,10 @@ function initDefaultChannels() {
       messageCount: state.messageCount || 0,
       useNewPricing: state.settings.useNewPricing || false,
       newPricingDate: state.settings.newPricingDate || new Date('2026-07-15T00:00:00+08:00').getTime(),
+      peakHours: [
+        { start: '09:00', end: '12:00' },
+        { start: '14:00', end: '18:00' }
+      ],
       pricingRules: cloneDefaultRules(),
     };
     channels.unshift(dsChannel);
@@ -833,11 +842,76 @@ function getChannelById(id) {
 }
 
 // Returns { channel, rule, prices, pricingType } or null
-function matchChannelForModel(model, timestamp) {
+function getActiveAPIKey(source) {
+  if (!source) return '';
+  var key = '';
+  try {
+    if (SECRET_KEYS && secret_state) {
+      var sKey = SECRET_KEYS[source.toUpperCase()];
+      if (sKey && secret_state[sKey]) {
+        key = secret_state[sKey];
+      }
+    }
+  } catch (e) {}
+  if (!key) {
+    try {
+      var doc = getDoc();
+      var id = 'api_key_' + source.toLowerCase();
+      var el = doc.getElementById(id);
+      if (el) key = el.value.trim();
+    } catch (e) {}
+  }
+  return key;
+}
+
+// Returns { channel, rule, prices, pricingType } or null
+function matchChannelForModel(model, timestamp, apiKey) {
   if (!model) return null;
   var m = model.toLowerCase();
   var ts = timestamp || Date.now();
   var channels = getChannels();
+
+  if (apiKey) {
+    for (var ci = 0; ci < channels.length; ci++) {
+      var ch = channels[ci];
+      if (ch.apiKey && ch.apiKey.trim() === apiKey.trim()) {
+        var rules = ch.pricingRules || [];
+        for (var ri = 0; ri < rules.length; ri++) {
+          var rule = rules[ri];
+          if (!rule.enabled) continue;
+          if (!rule.pattern) continue;
+          if (m.indexOf(rule.pattern.toLowerCase()) !== -1) {
+            var p, pricingType = 'match';
+            if (rule.peak && rule.offpeak && ch.useNewPricing) {
+              var afterDate = !ch.newPricingDate || ts >= ch.newPricingDate;
+              if (afterDate) {
+                var peak = isPeakHour(ts);
+                p = peak ? rule.peak : rule.offpeak;
+                pricingType = peak ? 'peak' : 'offpeak';
+              } else {
+                p = { hit: rule.hit, miss: rule.miss, output: rule.output };
+              }
+            } else if (ch.useNewPricing) {
+              var afterDate = !ch.newPricingDate || ts >= ch.newPricingDate;
+              if (afterDate && isPeakHour(ts)) {
+                var isChatOrReasoner = m.indexOf('chat') !== -1 || m.indexOf('reasoner') !== -1;
+                var multiplier = isChatOrReasoner ? 1 : 2;
+                p = { hit: rule.hit * multiplier, miss: rule.miss * multiplier, output: rule.output * multiplier };
+                pricingType = 'peak';
+              } else {
+                p = { hit: rule.hit, miss: rule.miss, output: rule.output };
+                pricingType = 'offpeak';
+              }
+            } else {
+              p = { hit: rule.hit, miss: rule.miss, output: rule.output };
+            }
+            return { channel: ch, rule: rule, prices: p, pricingType: pricingType };
+          }
+        }
+      }
+    }
+  }
+
   for (var ci = 0; ci < channels.length; ci++) {
     var ch = channels[ci];
     var rules = ch.pricingRules || [];
@@ -857,6 +931,17 @@ function matchChannelForModel(model, timestamp) {
         } else {
           p = { hit: rule.hit, miss: rule.miss, output: rule.output };
         }
+      } else if (ch.useNewPricing) {
+        var afterDate = !ch.newPricingDate || ts >= ch.newPricingDate;
+        if (afterDate && isPeakHour(ts)) {
+          var isChatOrReasoner = m.indexOf('chat') !== -1 || m.indexOf('reasoner') !== -1;
+          var multiplier = isChatOrReasoner ? 1 : 2;
+          p = { hit: rule.hit * multiplier, miss: rule.miss * multiplier, output: rule.output * multiplier };
+          pricingType = 'peak';
+        } else {
+          p = { hit: rule.hit, miss: rule.miss, output: rule.output };
+          pricingType = 'offpeak';
+        }
       } else {
         p = { hit: rule.hit, miss: rule.miss, output: rule.output };
       }
@@ -866,18 +951,58 @@ function matchChannelForModel(model, timestamp) {
   return null;
 }
 
+function parsePeakHours(str) {
+  var ranges = [];
+  if (!str) return ranges;
+  var parts = str.split(',');
+  for (var i = 0; i < parts.length; i++) {
+    var part = parts[i].trim();
+    if (!part) continue;
+    var sub = part.split('-');
+    if (sub.length === 2) {
+      var start = sub[0].trim();
+      var end = sub[1].trim();
+      if (/^\d{1,2}:\d{2}$/.test(start) && /^\d{1,2}:\d{2}$/.test(end)) {
+        ranges.push({ start: start, end: end });
+      }
+    }
+  }
+  return ranges;
+}
+
+function formatPeakHours(ranges) {
+  if (!Array.isArray(ranges) || ranges.length === 0) return '09:00-12:00, 14:00-18:00';
+  return ranges.map(function (r) { return r.start + '-' + r.end; }).join(', ');
+}
+
 // ─── Peak hour detection ──────────────────────────────────────────────────────
-function isPeakHour(timestamp) {
+function isPeakHour(timestamp, ch) {
   var d = new Date(timestamp);
-  var totalMinutes = (d.getUTCHours() * 60 + d.getUTCMinutes() + 8 * 60) % 1440;
-  return (totalMinutes >= 540 && totalMinutes < 720) || (totalMinutes >= 840 && totalMinutes < 1080);
+  var currentMinutes = (d.getUTCHours() * 60 + d.getUTCMinutes() + 8 * 60) % 1440;
+
+  var ranges = (ch && ch.peakHours) || [
+    { start: '09:00', end: '12:00' },
+    { start: '14:00', end: '18:00' }
+  ];
+
+  for (var i = 0; i < ranges.length; i++) {
+    var r = ranges[i];
+    var startParts = r.start.split(':');
+    var endParts = r.end.split(':');
+    var startMinutes = parseInt(startParts[0], 10) * 60 + parseInt(startParts[1], 10);
+    var endMinutes = parseInt(endParts[0], 10) * 60 + parseInt(endParts[1], 10);
+    if (currentMinutes >= startMinutes && currentMinutes < endMinutes) {
+      return true;
+    }
+  }
+  return false;
 }
 
 // ─── Cost calculation (uses channel rules) ────────────────────────────────────
-function calcCost(u) {
+function calcCost(u, apiKey) {
   var timestamp = u.timestamp || Date.now();
   var model = u.model || '';
-  var match = matchChannelForModel(model, timestamp);
+  var match = matchChannelForModel(model, timestamp, apiKey);
   if (!match) {
     return { input: 0, output: 0, total: 0, pricingType: 'unknown',
              channelId: '', channelName: '', ruleName: '', hitPrice: 0, missPrice: 0, outputPrice: 0 };
@@ -912,7 +1037,7 @@ function createTextHash(text) {
 }
 
 // ─── Usage processing ─────────────────────────────────────────────────────────
-async function processUsage(usage, model, isDebug, messages, requestId) {
+async function processUsage(usage, model, isDebug, messages, requestId, apiKey) {
   var modelName = (model && model.trim()) ? model.trim() : '';
   if (!modelName && !isDebug) { try { modelName = getContext().model || ''; } catch (e) {} }
   if (!modelName) modelName = 'deepseek-v4-flash';
@@ -951,7 +1076,7 @@ async function processUsage(usage, model, isDebug, messages, requestId) {
     completion_tokens: comp,
     total_tokens: total,
   };
-  lu.cost = calcCost(lu);
+  lu.cost = calcCost(lu, apiKey);
   state.lastUsage = lu;
 
   var s = getRealCurrentSave();
@@ -1191,14 +1316,30 @@ function updateDynamicThemeColors() {
     var panel = doc.getElementById('ds-panel');
     if (!panel) return;
     var temp = doc.createElement('div');
-    temp.style.color = 'var(--SmartThemeBlurTintColor)';
+    temp.style.color = 'var(--SmartThemeBlurTintColor, #080d14)';
     doc.body.appendChild(temp);
     var color = p.getComputedStyle(temp).color;
     doc.body.removeChild(temp);
     var opaqueColor = '#080d14';
-    var match = color.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
-    if (match) opaqueColor = 'rgb(' + match[1] + ', ' + match[2] + ', ' + match[3] + ')';
-    else if (color.startsWith('#')) opaqueColor = color;
+    if (color && color !== 'transparent') {
+      var match = color.match(/rgba?\((\d+(?:\.\d+)?)[,\s]+(\d+(?:\.\d+)?)[,\s]+(\d+(?:\.\d+)?)(?:[,\s/]+(\d+(?:\.\d+)?%?))?/);
+      if (match) {
+        var r = Math.round(parseFloat(match[1]));
+        var g = Math.round(parseFloat(match[2]));
+        var b = Math.round(parseFloat(match[3]));
+        var a = 1;
+        if (match[4] !== undefined) {
+          a = match[4].endsWith('%') ? parseFloat(match[4]) / 100 : parseFloat(match[4]);
+        }
+        if (a > 0) {
+          opaqueColor = 'rgb(' + r + ', ' + g + ', ' + b + ')';
+        }
+      } else if (color.startsWith('#')) {
+        opaqueColor = color;
+      } else if (color.startsWith('oklch') || color.startsWith('color') || color.startsWith('hsl') || color.startsWith('hwb')) {
+        opaqueColor = color.replace(/\s*\/\s*[\d.]+%?\s*\)/, ')');
+      }
+    }
     panel.style.setProperty('--ds-bg-opaque', opaqueColor);
     panel.style.setProperty('--ds-text-color', 'var(--SmartThemeBodyColor, #f3f4f6)');
     panel.style.setProperty('--ds-border-color', 'var(--SmartThemeBorderColor, #374151)');
@@ -1313,7 +1454,11 @@ function patchFetch() {
                 }
               });
             }
-            if (data && data.usage) processUsage(data.usage, data.model || '', false, capturedMessages, resId);
+            if (data && data.usage) {
+              var source = req && req.chat_completion_source;
+              var apiKey = getActiveAPIKey(source);
+              processUsage(data.usage, data.model || '', false, capturedMessages, resId, apiKey);
+            }
           } catch (e) {}
         }).catch(function () {});
         return res;
@@ -1493,6 +1638,7 @@ function bindUIControls(doc) {
       state.currentSave = e.target.value;
       if (state.currentSave !== '__all__') { state.lastRealSave = state.currentSave; await saveLastRealSaveKey(); }
       state.activeModelFilter = '__all__';
+      state.activeChannelFilter = '__all__';
       await saveCurrentSaveKey(); refreshUI();
     };
   }
@@ -1720,18 +1866,24 @@ function renderChannelBlock(ch) {
   html += '<input type="number" min="1" max="100" class="ds-input-compact ds-ch-interval" data-chid="' + chId + '" value="' + (ch.balanceInterval || 10) + '" style="width:40px;height:20px;padding:2px 4px;font-size:11px;text-align:center;">';
   html += '<span style="font-size:10px;color:var(--SmartThemeEmColor)">条自动查询</span></div>';
 
-  // Peak pricing toggle (only for channels with rules that have peak/offpeak)
-  var hasPeakRules = (ch.pricingRules || []).some(function (r) { return r.peak && r.offpeak; });
+  // Peak pricing toggle (always show for all channels)
+  var hasPeakRules = true;
   if (hasPeakRules) {
     html += '<div style="margin-bottom:6px;display:flex;align-items:center;justify-content:space-between;">';
     html += '<span style="font-size:11px;color:var(--SmartThemeEmColor)">新峰谷定价</span>';
     html += '<label class="ds-switch" style="transform:scale(0.8);transform-origin:right center;"><input type="checkbox" class="ds-ch-new-pricing" data-chid="' + chId + '"' + (ch.useNewPricing ? ' checked' : '') + '><span class="ds-switch-slider"></span></label>';
     html += '</div>';
-    html += '<div class="ds-ch-pricing-date" data-chid="' + chId + '" style="margin-bottom:6px;display:' + (ch.useNewPricing ? 'flex' : 'none') + ';align-items:center;gap:4px;">';
+    html += '<div class="ds-ch-pricing-date" data-chid="' + chId + '" style="margin-bottom:6px;display:' + (ch.useNewPricing ? 'flex' : 'none') + ';flex-direction:column;gap:4px;">';
+    html += '<div style="display:flex;align-items:center;gap:4px;width:100%;">';
     html += '<span style="font-size:10px;color:var(--SmartThemeEmColor)">生效日</span>';
     html += '<input type="date" class="ds-input-compact ds-ch-pricing-date-inp" data-chid="' + chId + '" value="' + (ch.newPricingDate ? formatYMD(ch.newPricingDate) : '') + '" style="flex:1;height:20px;padding:2px 4px;font-size:10px;">';
     html += '<button class="ds-btn ds-btn-sm ds-btn-normal ds-ch-pricing-today" data-chid="' + chId + '" style="padding:1px 5px;font-size:10px;">今天</button>';
-    html += '<div style="font-size:9px;color:var(--SmartThemeEmColor);margin-top:2px;">高峰：9:00~12:00, 14:00~18:00 (北京时间)</div>';
+    html += '</div>';
+    var peakStr = formatPeakHours(ch.peakHours);
+    html += '<div style="display:flex;flex-direction:column;gap:2px;">';
+    html += '<span style="font-size:9px;color:var(--SmartThemeEmColor)">高峰时间段 (北京时间)</span>';
+    html += '<input type="text" class="ds-input-compact ds-ch-peak-hours-inp" data-chid="' + chId + '" value="' + escapeHTML(peakStr) + '" placeholder="例: 09:00-12:00, 14:00-18:00" style="height:20px;padding:2px 4px;font-size:10px;width:100%;box-sizing:border-box;">';
+    html += '</div>';
     html += '</div>';
   }
 
@@ -1752,9 +1904,7 @@ function renderChannelBlock(ch) {
   html += '<input type="color" class="ds-ch-color-pick" data-chid="' + chId + '" value="' + (ch.color || '#6366f1') + '" style="width:28px;height:24px;padding:1px;border:none;background:transparent;cursor:pointer;">';
   html += '<button class="ds-btn ds-btn-sm ds-btn-normal ds-ch-save-name" data-chid="' + chId + '" style="padding:2px 8px;font-size:11px;">保存</button>';
   html += '</div>';
-  if (!ch.isDefault) {
-    html += '<button class="ds-btn ds-btn-sm ds-btn-danger ds-ch-delete" data-chid="' + chId + '" style="width:100%;font-size:11px;">删除此渠道</button>';
-  }
+  html += '<button class="ds-btn ds-btn-sm ds-btn-danger ds-ch-delete" data-chid="' + chId + '" style="width:100%;font-size:11px;">删除此渠道</button>';
   html += '</div>';
 
   html += '</div>'; // ds-ch-body
@@ -1762,15 +1912,56 @@ function renderChannelBlock(ch) {
   return html;
 }
 
+function getRuleDisplayPrices(ch, rule) {
+  var hasPeak = !!(rule.peak && rule.offpeak);
+  var peak, offpeak;
+  if (hasPeak) {
+    peak = rule.peak;
+    offpeak = rule.offpeak;
+  } else {
+    var m = (rule.pattern || '').toLowerCase();
+    var isChatOrReasoner = m.indexOf('chat') !== -1 || m.indexOf('reasoner') !== -1;
+    var multiplier = isChatOrReasoner ? 1 : 2;
+    offpeak = { hit: rule.hit, miss: rule.miss, output: rule.output };
+    peak = { hit: rule.hit * multiplier, miss: rule.miss * multiplier, output: rule.output * multiplier };
+  }
+  return { peak: peak, offpeak: offpeak };
+}
+
 function renderRuleRow(chId, rule) {
   var ruleId = escapeHTML(rule.id);
   var cid = escapeHTML(chId);
-  var prices = 'h¥' + rule.hit + ' m¥' + rule.miss + ' o¥' + rule.output;
+  var ch = getChannelById(chId);
+  
+  var pricesHtml = '';
+  if (ch && ch.useNewPricing) {
+    var dp = getRuleDisplayPrices(ch, rule);
+    var isPeakNow = isPeakHour(Date.now(), ch);
+    
+    var offStr = '常规: h¥' + dp.offpeak.hit.toFixed(3).replace(/\.?0+$/, '') + 
+                 ' m¥' + dp.offpeak.miss.toFixed(3).replace(/\.?0+$/, '') + 
+                 ' o¥' + dp.offpeak.output.toFixed(3).replace(/\.?0+$/, '');
+                 
+    var peakStr = '高峰: h¥' + dp.peak.hit.toFixed(3).replace(/\.?0+$/, '') + 
+                  ' m¥' + dp.peak.miss.toFixed(3).replace(/\.?0+$/, '') + 
+                  ' o¥' + dp.peak.output.toFixed(3).replace(/\.?0+$/, '');
+                  
+    if (isPeakNow) {
+      pricesHtml = '<span style="color:var(--SmartThemeEmColor);text-decoration:line-through;opacity:0.6;margin-right:6px;">' + escapeHTML(offStr) + '</span>' +
+                   '<span style="color:#f97316;font-weight:600;">' + escapeHTML(peakStr) + ' ⚡ 高峰中</span>';
+    } else {
+      pricesHtml = '<span style="color:var(--SmartThemeQuoteColor);font-weight:600;">' + escapeHTML(offStr) + ' ✓ 活跃</span>' +
+                   '<span style="color:var(--SmartThemeEmColor);opacity:0.6;margin-left:6px;">' + escapeHTML(peakStr) + '</span>';
+    }
+  } else {
+    pricesHtml = 'h¥' + rule.hit + ' m¥' + rule.miss + ' o¥' + rule.output;
+  }
+
   var html = '<div class="ds-rule-row" data-chid="' + cid + '" data-ruleid="' + ruleId + '" style="display:flex;align-items:center;gap:4px;padding:3px 0;font-size:11px;border-bottom:1px solid rgba(255,255,255,0.04);">';
   html += '<input type="checkbox" class="ds-rule-toggle" data-chid="' + cid + '" data-ruleid="' + ruleId + '"' + (rule.enabled ? ' checked' : '') + ' style="flex-shrink:0;">';
   html += '<div style="flex:1;min-width:0;">';
   html += '<div style="font-weight:500;color:var(--SmartThemeBodyColor);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="' + escapeHTML(rule.pattern) + '">' + escapeHTML(rule.label || rule.pattern) + '</div>';
-  html += '<div style="font-size:9px;color:var(--SmartThemeEmColor);">' + escapeHTML(prices) + '</div>';
+  html += '<div style="font-size:9px;color:var(--SmartThemeEmColor);">' + pricesHtml + '</div>';
   html += '</div>';
   if (rule.isDefault) {
     html += '<span style="font-size:9px;padding:1px 3px;border-radius:2px;background:rgba(99,102,241,0.15);color:#818cf8;flex-shrink:0;">预置</span>';
@@ -1783,22 +1974,59 @@ function renderRuleRow(chId, rule) {
 }
 
 function renderRuleForm(chId, existingRule) {
-  // existingRule is null for new, or the rule object for edit
   var r = existingRule || { pattern: '', label: '', hit: 0, miss: 0, output: 0 };
+  var hasPeak = !!(r.peak && r.offpeak);
+  var peakHit = hasPeak ? r.peak.hit : r.hit;
+  var peakMiss = hasPeak ? r.peak.miss : r.miss;
+  var peakOutput = hasPeak ? r.peak.output : r.output;
+  var offHit = hasPeak ? r.offpeak.hit : r.hit;
+  var offMiss = hasPeak ? r.offpeak.miss : r.miss;
+  var offOutput = hasPeak ? r.offpeak.output : r.output;
+
   var html = '<div style="background:rgba(255,255,255,0.03);border:1px solid var(--SmartThemeBorderColor,#374151);border-radius:6px;padding:8px;">';
   html += '<div style="font-size:10px;font-weight:600;color:var(--SmartThemeBodyColor);margin-bottom:6px;">' + (existingRule ? '编辑规则' : '添加规则') + '</div>';
-  html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;margin-bottom:4px;">';
+  html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;margin-bottom:6px;">';
   html += '<div><div style="font-size:9px;color:var(--SmartThemeEmColor);margin-bottom:2px;">匹配关键字 <span style="color:#f87171">*</span></div>' +
           '<input type="text" id="ds-rf-pattern" class="ds-input-compact" value="' + escapeHTML(r.pattern) + '" placeholder="如: gpt-4o" style="height:22px;padding:2px 4px;font-size:11px;width:100%;box-sizing:border-box;"></div>';
   html += '<div><div style="font-size:9px;color:var(--SmartThemeEmColor);margin-bottom:2px;">显示名称 (可选)</div>' +
           '<input type="text" id="ds-rf-label" class="ds-input-compact" value="' + escapeHTML(r.label || '') + '" placeholder="如: GPT-4o" style="height:22px;padding:2px 4px;font-size:11px;width:100%;box-sizing:border-box;"></div>';
-  html += '<div><div style="font-size:9px;color:var(--SmartThemeEmColor);margin-bottom:2px;">命中价格 (CNY/1M)</div>' +
+  html += '</div>';
+
+  html += '<div style="margin-bottom:6px;display:flex;align-items:center;gap:4px;">' +
+          '<input type="checkbox" id="ds-rf-has-peak" ' + (hasPeak ? 'checked' : '') + ' style="margin:0;cursor:pointer;">' +
+          '<label for="ds-rf-has-peak" style="font-size:10px;color:var(--SmartThemeBodyColor);cursor:pointer;user-select:none;">自定义峰谷定价</label>' +
+          '</div>';
+
+  html += '<div id="ds-rf-standard-pricing-group" style="display:' + (hasPeak ? 'none' : 'grid') + ';grid-template-columns:1fr 1fr 1fr;gap:4px;margin-bottom:6px;">';
+  html += '<div><div style="font-size:9px;color:var(--SmartThemeEmColor);margin-bottom:2px;">命中价格</div>' +
           '<input type="number" step="any" id="ds-rf-hit" class="ds-input-compact" value="' + r.hit + '" style="height:22px;padding:2px 4px;font-size:11px;width:100%;box-sizing:border-box;"></div>';
-  html += '<div><div style="font-size:9px;color:var(--SmartThemeEmColor);margin-bottom:2px;">未命中价格 (CNY/1M)</div>' +
+  html += '<div><div style="font-size:9px;color:var(--SmartThemeEmColor);margin-bottom:2px;">未命中价格</div>' +
           '<input type="number" step="any" id="ds-rf-miss" class="ds-input-compact" value="' + r.miss + '" style="height:22px;padding:2px 4px;font-size:11px;width:100%;box-sizing:border-box;"></div>';
-  html += '<div><div style="font-size:9px;color:var(--SmartThemeEmColor);margin-bottom:2px;">输出价格 (CNY/1M)</div>' +
+  html += '<div><div style="font-size:9px;color:var(--SmartThemeEmColor);margin-bottom:2px;">输出价格</div>' +
           '<input type="number" step="any" id="ds-rf-output" class="ds-input-compact" value="' + r.output + '" style="height:22px;padding:2px 4px;font-size:11px;width:100%;box-sizing:border-box;"></div>';
   html += '</div>';
+
+  html += '<div id="ds-rf-peak-pricing-group" style="display:' + (hasPeak ? 'block' : 'none') + ';margin-bottom:6px;">';
+  html += '<div style="font-size:9px;font-weight:600;color:var(--SmartThemeQuoteColor);margin-bottom:2px;">低谷/常规时段价格 (CNY/1M)</div>';
+  html += '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:4px;margin-bottom:4px;">';
+  html += '<div><div style="font-size:8px;color:var(--SmartThemeEmColor);margin-bottom:1px;">命中</div>' +
+          '<input type="number" step="any" id="ds-rf-off-hit" class="ds-input-compact" value="' + offHit + '" style="height:20px;padding:1px 3px;font-size:10px;width:100%;box-sizing:border-box;"></div>';
+  html += '<div><div style="font-size:8px;color:var(--SmartThemeEmColor);margin-bottom:1px;">未命中</div>' +
+          '<input type="number" step="any" id="ds-rf-off-miss" class="ds-input-compact" value="' + offMiss + '" style="height:20px;padding:1px 3px;font-size:10px;width:100%;box-sizing:border-box;"></div>';
+  html += '<div><div style="font-size:8px;color:var(--SmartThemeEmColor);margin-bottom:1px;">输出</div>' +
+          '<input type="number" step="any" id="ds-rf-off-output" class="ds-input-compact" value="' + offOutput + '" style="height:20px;padding:1px 3px;font-size:10px;width:100%;box-sizing:border-box;"></div>';
+  html += '</div>';
+  html += '<div style="font-size:9px;font-weight:600;color:#f97316;margin-bottom:2px;">高峰时段价格 (CNY/1M)</div>';
+  html += '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:4px;margin-bottom:4px;">';
+  html += '<div><div style="font-size:8px;color:var(--SmartThemeEmColor);margin-bottom:1px;">命中</div>' +
+          '<input type="number" step="any" id="ds-rf-peak-hit" class="ds-input-compact" value="' + peakHit + '" style="height:20px;padding:1px 3px;font-size:10px;width:100%;box-sizing:border-box;"></div>';
+  html += '<div><div style="font-size:8px;color:var(--SmartThemeEmColor);margin-bottom:1px;">未命中</div>' +
+          '<input type="number" step="any" id="ds-rf-peak-miss" class="ds-input-compact" value="' + peakMiss + '" style="height:20px;padding:1px 3px;font-size:10px;width:100%;box-sizing:border-box;"></div>';
+  html += '<div><div style="font-size:8px;color:var(--SmartThemeEmColor);margin-bottom:1px;">输出</div>' +
+          '<input type="number" step="any" id="ds-rf-peak-output" class="ds-input-compact" value="' + peakOutput + '" style="height:20px;padding:1px 3px;font-size:10px;width:100%;box-sizing:border-box;"></div>';
+  html += '</div>';
+  html += '</div>';
+
   html += '<div id="ds-rf-error" style="font-size:10px;color:#f87171;min-height:14px;margin-bottom:4px;"></div>';
   html += '<div style="display:flex;gap:4px;">';
   html += '<button id="ds-rf-save" class="ds-btn ds-btn-sm ds-btn-primary" style="flex:1;font-size:11px;">保存</button>';
@@ -1815,6 +2043,19 @@ function showAddChannelInlineForm(doc) {
   var existing = container.querySelector('#ds-add-ch-form');
   if (existing) { existing.remove(); return; }
 
+  var channels = getChannels();
+  var copyOptionsHtml = '<option value="">-- 不复制定价规则 --</option>';
+  channels.forEach(function (ch) {
+    copyOptionsHtml += '<option value="' + ch.id + '">' + escapeHTML(ch.name) + '</option>';
+  });
+
+  var rulesHtml = DS_DEFAULT_RULES.map(function (r) {
+    return '<label style="display:flex;align-items:center;gap:6px;font-size:10px;color:var(--SmartThemeBodyColor);cursor:pointer;margin-bottom:2px;">' +
+      '<input type="checkbox" class="ds-nch-def-rule" value="' + r.id + '" checked style="margin:0;">' +
+      '<span>' + escapeHTML(r.label) + '</span>' +
+      '</label>';
+  }).join('');
+
   var form = doc.createElement('div');
   form.id = 'ds-add-ch-form';
   form.style.cssText = 'background:rgba(255,255,255,0.03);border:1px solid var(--SmartThemeBorderColor,#374151);border-radius:6px;padding:8px;margin-bottom:8px;';
@@ -1825,9 +2066,23 @@ function showAddChannelInlineForm(doc) {
     '<div style="margin-bottom:6px;"><div style="font-size:9px;color:var(--SmartThemeEmColor);margin-bottom:2px;">标识颜色</div>' +
     '<input type="color" id="ds-nch-color" value="#10b981" style="width:28px;height:24px;padding:1px;border:none;background:transparent;cursor:pointer;"></div>' +
     '<div style="margin-bottom:6px;"><div style="font-size:9px;color:var(--SmartThemeEmColor);margin-bottom:2px;">余额查询方式</div>' +
-    '<select id="ds-nch-qtype" class="ds-input-compact" style="height:22px;padding:2px 4px;font-size:11px;">' +
+    '<select id="ds-nch-qtype" class="ds-input-compact" style="height:22px;padding:2px 4px;font-size:11px;width:100%;box-sizing:border-box;">' +
     '<option value="none">无</option><option value="deepseek">DeepSeek 格式</option><option value="openai">OpenAI 兼容</option>' +
     '</select></div>' +
+    
+    '<div style="margin-bottom:6px;">' +
+    '<div style="font-size:9px;color:var(--SmartThemeEmColor);margin-bottom:2px;">从已有渠道复制定价规则</div>' +
+    '<select id="ds-nch-copy-src" class="ds-input-compact" style="height:22px;padding:2px 4px;font-size:11px;width:100%;box-sizing:border-box;">' +
+    copyOptionsHtml +
+    '</select></div>' +
+
+    '<div id="ds-nch-preset-rules-group" style="margin-bottom:8px;">' +
+    '<div style="font-size:9px;color:var(--SmartThemeEmColor);margin-bottom:3px;">或导入预置定价规则</div>' +
+    '<div style="background:rgba(255,255,255,0.02);border:1px solid var(--SmartThemeBorderColor,#374151);border-radius:4px;padding:6px;display:flex;flex-direction:column;gap:4px;">' +
+    rulesHtml +
+    '</div>' +
+    '</div>' +
+
     '<div id="ds-nch-error" style="font-size:10px;color:#f87171;min-height:14px;margin-bottom:4px;"></div>' +
     '<div style="display:flex;gap:4px;">' +
     '<button id="ds-nch-create" class="ds-btn ds-btn-sm ds-btn-primary" style="flex:1;font-size:11px;">创建</button>' +
@@ -1837,6 +2092,14 @@ function showAddChannelInlineForm(doc) {
   var addBtn = container.querySelector('#ds-cm-add-channel');
   if (addBtn) container.insertBefore(form, addBtn.nextSibling);
   else container.insertBefore(form, container.firstChild);
+
+  var copySrcSelect = form.querySelector('#ds-nch-copy-src');
+  var presetGroup   = form.querySelector('#ds-nch-preset-rules-group');
+  if (copySrcSelect && presetGroup) {
+    copySrcSelect.onchange = function () {
+      presetGroup.style.display = this.value ? 'none' : 'block';
+    };
+  }
 
   var createBtn = form.querySelector('#ds-nch-create');
   var cancelBtn = form.querySelector('#ds-nch-cancel');
@@ -1848,13 +2111,59 @@ function showAddChannelInlineForm(doc) {
     var color2 = form.querySelector('#ds-nch-color').value || '#10b981';
     var qtype  = form.querySelector('#ds-nch-qtype').value;
     if (!name) { if (errEl) errEl.textContent = '请填写渠道名称'; return; }
+
+    var copySrcId = copySrcSelect ? copySrcSelect.value : '';
+    var newRules = [];
+
+    if (copySrcId) {
+      var srcCh = getChannelById(copySrcId);
+      if (srcCh && Array.isArray(srcCh.pricingRules)) {
+        srcCh.pricingRules.forEach(function (r) {
+          newRules.push({
+            id: makeNewRuleId(),
+            pattern: r.pattern,
+            label: r.label,
+            hit: r.hit,
+            miss: r.miss,
+            output: r.output,
+            isDefault: r.isDefault,
+            enabled: r.enabled,
+            offpeak: r.offpeak ? Object.assign({}, r.offpeak) : undefined,
+            peak: r.peak ? Object.assign({}, r.peak) : undefined,
+          });
+        });
+      }
+    } else {
+      var chosenRuleIds = Array.from(form.querySelectorAll('.ds-nch-def-rule:checked')).map(function (el) { return el.value; });
+      DS_DEFAULT_RULES.forEach(function (r) {
+        if (chosenRuleIds.indexOf(r.id) !== -1) {
+          newRules.push({
+            id: makeNewRuleId(),
+            pattern: r.pattern,
+            label: r.label,
+            hit: r.hit,
+            miss: r.miss,
+            output: r.output,
+            isDefault: true,
+            enabled: true,
+            offpeak: Object.assign({}, r.offpeak),
+            peak: Object.assign({}, r.peak),
+          });
+        }
+      });
+    }
+
     var newCh = {
       id: makeNewChannelId(), name: name, color: color2, isDefault: false,
       apiKey: '', balanceQueryType: qtype, balanceQueryUrl: '',
       balance: null, customBalance: null,
       autoBalance: false, balanceInterval: 10, messageCount: 0,
       useNewPricing: false, newPricingDate: new Date('2026-07-15T00:00:00+08:00').getTime(),
-      pricingRules: [],
+      peakHours: [
+        { start: '09:00', end: '12:00' },
+        { start: '14:00', end: '18:00' }
+      ],
+      pricingRules: newRules,
     };
     state.settings.channels.push(newCh);
     saveSettings();
@@ -1974,9 +2283,13 @@ function bindChannelManagerControls(doc, container) {
       var ch = getChannelById(chId);
       if (!ch) return;
       ch.useNewPricing = chk.checked;
-      var dateDiv = container.querySelector('.ds-ch-pricing-date[data-chid="' + chId + '"]');
-      if (dateDiv) dateDiv.style.display = chk.checked ? 'flex' : 'none';
       await saveSettings();
+      renderChannelManager(doc);
+      
+      var body = container.querySelector('.ds-ch-body[data-chid="' + chId + '"]');
+      var chev = container.querySelector('.ds-ch-chevron[data-chid="' + chId + '"]');
+      if (body) body.style.display = 'block';
+      if (chev) chev.style.transform = 'rotate(180deg)';
     };
   });
   container.querySelectorAll('.ds-ch-pricing-date-inp').forEach(function (inp) {
@@ -1996,6 +2309,21 @@ function bindChannelManagerControls(doc, container) {
       if (inp) inp.value = today;
       ch.newPricingDate = new Date(today + 'T00:00:00+08:00').getTime();
       await saveSettings();
+    };
+  });
+  container.querySelectorAll('.ds-ch-peak-hours-inp').forEach(function (inp) {
+    inp.onchange = async function () {
+      var chId = inp.getAttribute('data-chid');
+      var ch = getChannelById(chId);
+      if (!ch) return;
+      var val = inp.value.trim();
+      var parsed = parsePeakHours(val);
+      if (parsed.length > 0) {
+        ch.peakHours = parsed;
+        await saveSettings();
+      } else {
+        inp.value = formatPeakHours(ch.peakHours);
+      }
     };
   });
 
@@ -2076,6 +2404,9 @@ function bindChannelManagerControls(doc, container) {
     btn.onclick = async function () {
       var chId = btn.getAttribute('data-chid');
       if (!confirm('确定删除此渠道？其定价规则将被清除。')) return;
+      if (chId === 'ch_ds_official') {
+        state.settings.isDsOfficialDeleted = true;
+      }
       state.settings.channels = getChannels().filter(function (ch) { return ch.id !== chId; });
       await saveSettings();
       renderChannelManager(doc);
@@ -2088,29 +2419,81 @@ function bindRuleForm(doc, formContainer, chId, existingRule) {
   var saveBtn   = formContainer.querySelector('#ds-rf-save');
   var cancelBtn = formContainer.querySelector('#ds-rf-cancel');
   var errEl     = formContainer.querySelector('#ds-rf-error');
+  var hasPeakChk = formContainer.querySelector('#ds-rf-has-peak');
+  var stdGroup  = formContainer.querySelector('#ds-rf-standard-pricing-group');
+  var peakGroup = formContainer.querySelector('#ds-rf-peak-pricing-group');
+
+  if (hasPeakChk && stdGroup && peakGroup) {
+    hasPeakChk.onchange = function () {
+      stdGroup.style.display = this.checked ? 'none' : 'grid';
+      peakGroup.style.display = this.checked ? 'block' : 'none';
+    };
+  }
 
   if (cancelBtn) cancelBtn.onclick = function () { formContainer.style.display = 'none'; formContainer.innerHTML = ''; };
 
   if (saveBtn) saveBtn.onclick = async function () {
     var pattern = (formContainer.querySelector('#ds-rf-pattern').value || '').trim();
     var label   = (formContainer.querySelector('#ds-rf-label').value || '').trim();
-    var hit     = parseFloat(formContainer.querySelector('#ds-rf-hit').value)    || 0;
-    var miss    = parseFloat(formContainer.querySelector('#ds-rf-miss').value)   || 0;
-    var output  = parseFloat(formContainer.querySelector('#ds-rf-output').value) || 0;
-
     if (!pattern) { if (errEl) errEl.textContent = '请填写匹配关键字'; return; }
 
+    var hit, miss, output, peakObj = null, offpeakObj = null;
     var ch = getChannelById(chId);
     if (!ch) return;
+
+    var usePeakInputs = hasPeakChk && hasPeakChk.checked;
+    if (usePeakInputs) {
+      var ph = parseFloat(formContainer.querySelector('#ds-rf-peak-hit').value) || 0;
+      var pm = parseFloat(formContainer.querySelector('#ds-rf-peak-miss').value) || 0;
+      var po = parseFloat(formContainer.querySelector('#ds-rf-peak-output').value) || 0;
+      var oh = parseFloat(formContainer.querySelector('#ds-rf-off-hit').value) || 0;
+      var om = parseFloat(formContainer.querySelector('#ds-rf-off-miss').value) || 0;
+      var oo = parseFloat(formContainer.querySelector('#ds-rf-off-output').value) || 0;
+      
+      hit = oh; miss = om; output = oo;
+      peakObj = { hit: ph, miss: pm, output: po };
+      offpeakObj = { hit: oh, miss: om, output: oo };
+    } else {
+      hit = parseFloat(formContainer.querySelector('#ds-rf-hit').value) || 0;
+      miss = parseFloat(formContainer.querySelector('#ds-rf-miss').value) || 0;
+      output = parseFloat(formContainer.querySelector('#ds-rf-output').value) || 0;
+    }
 
     if (existingRule) {
       // Edit existing
       var rule = (ch.pricingRules || []).find(function (r) { return r.id === existingRule.id; });
-      if (rule) { rule.pattern = pattern; rule.label = label; rule.hit = hit; rule.miss = miss; rule.output = output; }
+      if (rule) {
+        rule.pattern = pattern;
+        rule.label = label;
+        rule.hit = hit;
+        rule.miss = miss;
+        rule.output = output;
+        if (usePeakInputs) {
+          rule.peak = peakObj;
+          rule.offpeak = offpeakObj;
+        } else {
+          delete rule.peak;
+          delete rule.offpeak;
+        }
+      }
     } else {
       // Add new
       if (!Array.isArray(ch.pricingRules)) ch.pricingRules = [];
-      ch.pricingRules.push({ id: makeNewRuleId(), pattern: pattern, label: label, hit: hit, miss: miss, output: output, isDefault: false, enabled: true });
+      var newRule = {
+        id: makeNewRuleId(),
+        pattern: pattern,
+        label: label,
+        hit: hit,
+        miss: miss,
+        output: output,
+        isDefault: false,
+        enabled: true
+      };
+      if (usePeakInputs) {
+        newRule.peak = peakObj;
+        newRule.offpeak = offpeakObj;
+      }
+      ch.pricingRules.push(newRule);
     }
 
     await saveSettings();
@@ -2170,10 +2553,16 @@ function refreshUI() {
 // ─── Model filter: get filtered data ─────────────────────────────────────────
 function getFilteredDisplayData(s) {
   if (!s) return s;
-  var filter = state.activeModelFilter || '__all__';
-  if (filter === '__all__') return s;
+  var modelFilter = state.activeModelFilter || '__all__';
+  var channelFilter = state.activeChannelFilter || '__all__';
+  if (modelFilter === '__all__' && channelFilter === '__all__') return s;
 
-  var history = (s.history || []).filter(function (h) { return h.model === filter; });
+  var history = (s.history || []).filter(function (h) {
+    var matchModel = modelFilter === '__all__' || h.model === modelFilter;
+    var matchChannel = channelFilter === '__all__' || h.channelId === channelFilter;
+    return matchModel && matchChannel;
+  });
+
   var fd = {
     rounds: history.length,
     total_tokens: 0, total_cost: 0, input_tokens: 0, output_tokens: 0,
@@ -2236,6 +2625,38 @@ function renderModelFilter(doc, s) {
 
   container.querySelectorAll('.ds-model-filter-btn').forEach(function (btn) {
     btn.onclick = function () { state.activeModelFilter = btn.getAttribute('data-model'); refreshUI(); };
+  });
+}
+
+function renderChannelFilter(doc, s) {
+  var container = doc.getElementById('ds-channel-filter');
+  if (!container) return;
+
+  if (!s || !s.history || s.history.length === 0) { container.innerHTML = ''; return; }
+
+  // Collect unique channels
+  var channelIds = [], seen = {};
+  s.history.forEach(function (item) {
+    if (item.channelId && !seen[item.channelId]) {
+      seen[item.channelId] = true;
+      channelIds.push({ id: item.channelId, name: item.channelName || '未知渠道' });
+    }
+  });
+
+  if (channelIds.length < 2) { container.innerHTML = ''; return; }
+
+  var active = state.activeChannelFilter || '__all__';
+  var html = '<div style="display:flex;flex-wrap:wrap;gap:3px;margin-top:4px;">';
+  html += '<button class="ds-btn ds-btn-sm ds-channel-filter-btn ' + (active === '__all__' ? 'ds-btn-primary' : 'ds-btn-normal') + '" data-chid="__all__" style="padding:1px 6px;font-size:10px;">全部渠道</button>';
+  channelIds.forEach(function (ch) {
+    var shortName = ch.name.length > 22 ? ch.name.slice(0, 20) + '…' : ch.name;
+    html += '<button class="ds-btn ds-btn-sm ds-channel-filter-btn ' + (active === ch.id ? 'ds-btn-primary' : 'ds-btn-normal') + '" data-chid="' + escapeHTML(ch.id) + '" title="' + escapeHTML(ch.name) + '" style="padding:1px 6px;font-size:10px;">' + escapeHTML(shortName) + '</button>';
+  });
+  html += '</div>';
+  container.innerHTML = html;
+
+  container.querySelectorAll('.ds-channel-filter-btn').forEach(function (btn) {
+    btn.onclick = function () { state.activeChannelFilter = btn.getAttribute('data-chid'); refreshUI(); };
   });
 }
 
@@ -2329,6 +2750,7 @@ function _doRefreshUI() {
 
   // Render model filter based on raw (unfiltered) save
   renderModelFilter(doc, rawSave);
+  renderChannelFilter(doc, rawSave);
 
   // Get filtered data for stat display
   var s = getFilteredDisplayData(rawSave);
