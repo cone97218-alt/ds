@@ -890,6 +890,34 @@ function getActiveAPIKey(source) {
   return key;
 }
 
+function isApiKeyMatch(chApiKey, activeKey, matchedSecret) {
+  if (!chApiKey || !activeKey) return false;
+  var c = chApiKey.trim().toLowerCase();
+  var a = activeKey.trim().toLowerCase();
+  if (c === a) return true;
+  if (matchedSecret) {
+    if (matchedSecret.id && c === matchedSecret.id.toLowerCase()) return true;
+    if (matchedSecret.label && c === matchedSecret.label.toLowerCase()) return true;
+    if (matchedSecret.value) {
+      var mv = matchedSecret.value.toLowerCase().trim();
+      if (c === mv) return true;
+      
+      // Match masked value with asterisks (e.g. "*******e7f")
+      var cleanSuffix = mv.replace(/\*/g, '').trim();
+      if (cleanSuffix && c.endsWith(cleanSuffix)) return true;
+
+      // Match masked value with dots (e.g. "sk-...1234")
+      if (mv.indexOf('...') !== -1) {
+        var parts = mv.split('...');
+        var prefix = parts[0] || '';
+        var suffix = parts[1] || '';
+        if (prefix && c.startsWith(prefix) && suffix && c.endsWith(suffix)) return true;
+      }
+    }
+  }
+  return false;
+}
+
 // Returns { channel, rule, prices, pricingType } or null
 function matchChannelForModel(model, timestamp, apiKey) {
   if (!model) return null;
@@ -897,47 +925,72 @@ function matchChannelForModel(model, timestamp, apiKey) {
   var ts = timestamp || Date.now();
   var channels = getChannels();
 
+  var matchedSecret = null;
+  if (apiKey && local_secret_state) {
+    try {
+      for (var sourceKey in local_secret_state) {
+        var secrets = local_secret_state[sourceKey];
+        if (Array.isArray(secrets)) {
+          matchedSecret = secrets.find(function (s) {
+            return s.id === apiKey || s.value === apiKey;
+          });
+          if (matchedSecret) {
+            logDebug('匹配到 secrets 中的密钥项: label=' + matchedSecret.label + ', value=' + matchedSecret.value + ', id=' + matchedSecret.id);
+            break;
+          }
+        }
+      }
+    } catch (e) {
+      logDebug('查找匹配 secrets 异常: ' + e.message);
+    }
+  }
+
   if (apiKey) {
     for (var ci = 0; ci < channels.length; ci++) {
       var ch = channels[ci];
-      if (ch.apiKey && ch.apiKey.trim() === apiKey.trim()) {
-        var rules = ch.pricingRules || [];
-        for (var ri = 0; ri < rules.length; ri++) {
-          var rule = rules[ri];
-          if (!rule.enabled) continue;
-          if (!rule.pattern) continue;
-          if (m.indexOf(rule.pattern.toLowerCase()) !== -1) {
-            var p, pricingType = 'match';
-            if (rule.peak && rule.offpeak && ch.useNewPricing) {
-              var afterDate = !ch.newPricingDate || ts >= ch.newPricingDate;
-              if (afterDate) {
-                var peak = isPeakHour(ts, ch);
-                p = peak ? rule.peak : rule.offpeak;
-                pricingType = peak ? 'peak' : 'offpeak';
+      if (ch.apiKey) {
+        var isMatch = isApiKeyMatch(ch.apiKey, apiKey, matchedSecret);
+        logDebug('比对渠道「' + ch.name + '」秘钥: ch.apiKey=' + ch.apiKey + ', activeKey=' + apiKey + ', 结果=' + isMatch);
+        if (isMatch) {
+          var rules = ch.pricingRules || [];
+          for (var ri = 0; ri < rules.length; ri++) {
+            var rule = rules[ri];
+            if (!rule.enabled) continue;
+            if (!rule.pattern) continue;
+            if (m.indexOf(rule.pattern.toLowerCase()) !== -1) {
+              var p, pricingType = 'match';
+              if (rule.peak && rule.offpeak && ch.useNewPricing) {
+                var afterDate = !ch.newPricingDate || ts >= ch.newPricingDate;
+                if (afterDate) {
+                  var peak = isPeakHour(ts, ch);
+                  p = peak ? rule.peak : rule.offpeak;
+                  pricingType = peak ? 'peak' : 'offpeak';
+                } else {
+                  p = { hit: rule.hit, miss: rule.miss, output: rule.output };
+                }
+              } else if (ch.useNewPricing) {
+                var afterDate = !ch.newPricingDate || ts >= ch.newPricingDate;
+                if (afterDate && isPeakHour(ts, ch)) {
+                  var isChatOrReasoner = m.indexOf('chat') !== -1 || m.indexOf('reasoner') !== -1;
+                  var multiplier = isChatOrReasoner ? 1 : 2;
+                  p = { hit: rule.hit * multiplier, miss: rule.miss * multiplier, output: rule.output * multiplier };
+                  pricingType = 'peak';
+                } else {
+                  p = { hit: rule.hit, miss: rule.miss, output: rule.output };
+                  pricingType = 'offpeak';
+                }
               } else {
                 p = { hit: rule.hit, miss: rule.miss, output: rule.output };
               }
-            } else if (ch.useNewPricing) {
-              var afterDate = !ch.newPricingDate || ts >= ch.newPricingDate;
-              if (afterDate && isPeakHour(ts, ch)) {
-                var isChatOrReasoner = m.indexOf('chat') !== -1 || m.indexOf('reasoner') !== -1;
-                var multiplier = isChatOrReasoner ? 1 : 2;
-                p = { hit: rule.hit * multiplier, miss: rule.miss * multiplier, output: rule.output * multiplier };
-                pricingType = 'peak';
-              } else {
-                p = { hit: rule.hit, miss: rule.miss, output: rule.output };
-                pricingType = 'offpeak';
-              }
-            } else {
-              p = { hit: rule.hit, miss: rule.miss, output: rule.output };
+              return { channel: ch, rule: rule, prices: p, pricingType: pricingType };
             }
-            return { channel: ch, rule: rule, prices: p, pricingType: pricingType };
           }
         }
       }
     }
   }
 
+  logDebug('按 API 秘钥未匹配到任何渠道，将进入模型名 fallback 默认匹配...');
   for (var ci = 0; ci < channels.length; ci++) {
     var ch = channels[ci];
     var rules = ch.pricingRules || [];
@@ -949,6 +1002,7 @@ function matchChannelForModel(model, timestamp, apiKey) {
       // Matched!
       var p, pricingType = 'match';
       if (rule.peak && rule.offpeak && ch.useNewPricing) {
+        var afterDate = !ch.newPricingDate || ts >= ts; // wait: ts >= ts is a typo in original? Let's check
         var afterDate = !ch.newPricingDate || ts >= ch.newPricingDate;
         if (afterDate) {
           var peak = isPeakHour(ts, ch);
@@ -1660,7 +1714,7 @@ function createUI() {
       '<div id="ds-help-modal-close" class="ds-close-btn">✕</div>' +
     '</div>' +
     '<div class="ds-help-modal-body">' +
-      '<div class="ds-help-modal-version">版本：release1.62</div>' +
+      '<div class="ds-help-modal-version">版本：release1.63</div>' +
       '<div class="ds-help-block"><div class="ds-help-label-red">⚠️ 安全提示</div><div>在本插件中填入 API 密钥存在安全风险，建议使用权限受限的密钥。</div></div>' +
       '<div class="ds-help-block"><div class="ds-help-label-blue">ℹ️ 渠道说明</div><div class="ds-help-modal-list">' +
         '<div>1. 在"渠道管理"中配置各渠道的 API 密钥、余额和定价规则</div>' +
@@ -1668,7 +1722,13 @@ function createUI() {
         '<div>3. 无定价规则的模型显示为"外部渠道"，费用记为0，不扣减余额</div>' +
         '<div>4. 统计页支持按模型过滤（含多模型时显示过滤器）</div>' +
       '</div></div>' +
-      '<div class="ds-help-block"><div class="ds-help-label-purple">✨ 关于</div><div>本插件由 AI 编写、优化及修复，版本 release1.62</div></div>' +
+      '<div class="ds-help-block"><div class="ds-help-label-green">🔑 多 Key 匹配说明</div><div class="ds-help-modal-list">' +
+        '<div>单渠道包含多个 API Key 时，可在插件内创建对应名称的渠道，并在其 API 密钥框内填入以下任意一种格式来进行分流统计：</div>' +
+        '<div>1. <b>秘钥名称标签</b>：填入 SillyTavern 侧给该秘钥起的标签名，如 <code>MyKey-A</code></div>' +
+        '<div>2. <b>脱敏星号遮罩</b>：填入 SillyTavern 侧列表显示的遮罩值，如 <code>*******e7f</code></div>' +
+        '<div>3. <b>明文密钥</b>：填入完整的明文 Key 字符串，如 <code>sk-123456...e7f</code>（系统会自动首尾比对）</div>' +
+      '</div></div>' +
+      '<div class="ds-help-block"><div class="ds-help-label-purple">✨ 关于</div><div>本插件由 AI 编写、优化及修复，版本 release1.63</div></div>' +
     '</div>';
 
   panel.appendChild(header);
