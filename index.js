@@ -3581,11 +3581,11 @@ function _doRefreshUI() {
     var elapsedSec = Math.max(0.1, ((now - gs.startTime) / 1000)).toFixed(1);
     var ttftText = gs.firstTokenTime ? ((gs.firstTokenTime - gs.startTime) / 1000).toFixed(1) + 's' : '等待首字...';
 
-    var statusStage = '等待响应...';
+    var statusStage = '<i class="fa-solid fa-hourglass-half" style="margin-right:3px;"></i>等待响应...';
     if (gs.reasoningStartTime && (!gs.firstTokenTime || (gs.reasoningEndTime && gs.reasoningEndTime >= gs.firstTokenTime))) {
-      statusStage = '思考中 🧠';
+      statusStage = '<i class="fa-solid fa-brain" style="margin-right:3px;color:var(--SmartThemeUnderlineColor);"></i>思考中';
     } else if (gs.firstTokenTime) {
-      statusStage = '吐字输出中 ✍️';
+      statusStage = '<i class="fa-solid fa-feather-pointed" style="margin-right:3px;color:var(--SmartThemeQuoteColor);"></i>吐字输出中';
     }
 
     latestEl.innerHTML =
