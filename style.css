@@ -17,6 +17,11 @@
     display: none;
 }
 
+#ds-overlay.ds-pc-mode {
+    pointer-events: none !important;
+    background: transparent !important;
+}
+
 #ds-panel {
     position: fixed;
     bottom: 0;

@@ -1706,6 +1706,10 @@ function applyDisplayMode() {
         panel.style.height = '100vh';
         panel.style.transform = 'none';
       }
+    var ov = doc.getElementById('ds-overlay');
+    if (ov) {
+      if (mode.startsWith('pc-') && isPC) ov.classList.add('ds-pc-mode');
+      else ov.classList.remove('ds-pc-mode');
     }
   }
 
@@ -1986,7 +1990,14 @@ function createUI() {
 
   var overlay = doc.createElement('div');
   overlay.id = 'ds-overlay';
-  overlay.addEventListener('click', function (e) { if (e.target === overlay) togglePanel(); });
+  overlay.addEventListener('click', function (e) {
+    if (e.target === overlay) {
+      var mode = state.settings.displayMode;
+      var win = getWin();
+      if (mode && mode.startsWith('pc-') && win.innerWidth > 760) return;
+      togglePanel();
+    }
+  });
 
   var panel = doc.createElement('div');
   panel.id = 'ds-panel';
