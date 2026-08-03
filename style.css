@@ -1136,3 +1136,154 @@
     overflow-y: auto;
     user-select: text;
 }
+
+/* ─── PC Window Display Modes & Resizing ─── */
+@media (min-width: 761px) {
+    /* PC Floating Window Mode */
+    #ds-panel.ds-pc-floating {
+        position: fixed !important;
+        background: var(--ds-bg-opaque, var(--SmartThemeBlurTintColor)) !important;
+        border-radius: 12px !important;
+        border: 1px solid var(--SmartThemeBorderColor) !important;
+        box-shadow: 0 12px 36px var(--SmartThemeShadowColor) !important;
+        opacity: 0 !important;
+        pointer-events: none !important;
+        transition: opacity 0.2s ease-out !important;
+        z-index: 100005 !important;
+        max-height: none !important;
+    }
+    #ds-panel.ds-pc-floating.ds-open {
+        opacity: 1 !important;
+        pointer-events: auto !important;
+    }
+    #ds-panel.ds-pc-floating .ds-header {
+        cursor: grab;
+        user-select: none;
+    }
+    #ds-panel.ds-pc-floating .ds-header:active {
+        cursor: grabbing;
+    }
+
+    /* PC Dock Left Mode */
+    #ds-panel.ds-pc-dock-left {
+        position: fixed !important;
+        top: 0 !important;
+        bottom: 0 !important;
+        left: 0 !important;
+        right: auto !important;
+        height: 100vh !important;
+        max-height: none !important;
+        background: var(--ds-bg-opaque, var(--SmartThemeBlurTintColor)) !important;
+        border-radius: 0 12px 12px 0 !important;
+        border-right: 1px solid var(--SmartThemeBorderColor) !important;
+        box-shadow: 10px 0 30px var(--SmartThemeShadowColor) !important;
+        transform: translateX(-100%) !important;
+        opacity: 0 !important;
+        pointer-events: none !important;
+        z-index: 100005 !important;
+    }
+    #ds-panel.ds-pc-dock-left.ds-open {
+        transform: translateX(0) !important;
+        opacity: 1 !important;
+        pointer-events: auto !important;
+    }
+
+    /* PC Dock Right Mode */
+    #ds-panel.ds-pc-dock-right {
+        position: fixed !important;
+        top: 0 !important;
+        bottom: 0 !important;
+        right: 0 !important;
+        left: auto !important;
+        height: 100vh !important;
+        max-height: none !important;
+        background: var(--ds-bg-opaque, var(--SmartThemeBlurTintColor)) !important;
+        border-radius: 12px 0 0 12px !important;
+        border-left: 1px solid var(--SmartThemeBorderColor) !important;
+        box-shadow: -10px 0 30px var(--SmartThemeShadowColor) !important;
+        transform: translateX(100%) !important;
+        opacity: 0 !important;
+        pointer-events: none !important;
+        z-index: 100005 !important;
+    }
+    #ds-panel.ds-pc-dock-right.ds-open {
+        transform: translateX(0) !important;
+        opacity: 1 !important;
+        pointer-events: auto !important;
+    }
+}
+
+/* Mobile Graceful Fallback for PC Modes */
+@media (max-width: 760px) {
+    #ds-panel.ds-pc-floating,
+    #ds-panel.ds-pc-dock-left,
+    #ds-panel.ds-pc-dock-right {
+        position: fixed !important;
+        top: 0 !important;
+        left: 0 !important;
+        right: 0 !important;
+        bottom: 0 !important;
+        width: 100vw !important;
+        height: 100vh !important;
+        max-height: none !important;
+        border-radius: 0 !important;
+        border: none !important;
+        transform: translateY(100%) !important;
+        opacity: 0 !important;
+        pointer-events: none !important;
+    }
+    #ds-panel.ds-pc-floating.ds-open,
+    #ds-panel.ds-pc-dock-left.ds-open,
+    #ds-panel.ds-pc-dock-right.ds-open {
+        transform: translateY(0) !important;
+        opacity: 1 !important;
+        pointer-events: auto !important;
+    }
+    .ds-resize-handle {
+        display: none !important;
+    }
+}
+
+/* Resize Handles Styling */
+.ds-resize-handle {
+    position: absolute;
+    z-index: 100010;
+    user-select: none;
+}
+.ds-pc-floating .ds-resize-se {
+    width: 16px;
+    height: 16px;
+    right: 2px;
+    bottom: 2px;
+    cursor: se-resize;
+    background: radial-gradient(circle, var(--SmartThemeEmColor) 1.5px, transparent 1.5px);
+    background-size: 4px 4px;
+    opacity: 0.6;
+    border-radius: 0 0 10px 0;
+}
+.ds-pc-floating .ds-resize-se:hover {
+    opacity: 1;
+}
+.ds-pc-floating .ds-resize-e,
+.ds-pc-dock-left .ds-resize-e {
+    top: 0;
+    right: -4px;
+    width: 8px;
+    height: 100%;
+    cursor: e-resize;
+}
+.ds-pc-floating .ds-resize-w,
+.ds-pc-dock-right .ds-resize-w {
+    top: 0;
+    left: -4px;
+    width: 8px;
+    height: 100%;
+    cursor: w-resize;
+}
+.ds-pc-floating .ds-resize-s {
+    bottom: -4px;
+    left: 0;
+    width: 100%;
+    height: 8px;
+    cursor: s-resize;
+}

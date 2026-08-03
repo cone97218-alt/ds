@@ -88,6 +88,11 @@ var DEFAULT_SETTINGS = {
   },
   channels: [],          // populated by initDefaultChannels()
   balanceLayout: 'vertical', // 'vertical' | 'horizontal'
+  pcWindow: {
+    floating: { left: null, top: null, width: 880, height: 720 },
+    dockLeft: { width: 460 },
+    dockRight: { width: 460 }
+  },
   // Legacy fields kept only for migration detection:
   autoBalance: false,
   balanceInterval: 10,
@@ -1479,21 +1484,236 @@ function updateDynamicThemeColors() {
   } catch (e) { console.warn('[DS] updateDynamicThemeColors:', e); }
 }
 
+var _isDragMoving = false;
+var _isResizing = false;
+
+function setupPCWindowInteractions() {
+  var doc = getDoc(), win = getWin();
+  var panel = doc.getElementById('ds-panel');
+  if (!panel || panel._ds_pc_events_bound) return;
+  panel._ds_pc_events_bound = true;
+
+  // Add resize handle elements to panel
+  ['se', 'e', 'w', 's'].forEach(function (dir) {
+    if (!panel.querySelector('.ds-resize-' + dir)) {
+      var h = doc.createElement('div');
+      h.className = 'ds-resize-handle ds-resize-' + dir;
+      h.setAttribute('data-dir', dir);
+      h.title = dir === 'se' ? '拖拽调整窗口大小' : (dir === 's' ? '拖拽调整高度' : '拖拽调整宽度');
+      panel.appendChild(h);
+    }
+  });
+
+  // 1. Header Drag to Move (PC Floating Mode)
+  var header = panel.querySelector('.ds-header');
+  if (header) {
+    header.addEventListener('mousedown', function (e) {
+      var mode = state.settings.displayMode;
+      if (mode !== 'pc-floating') return;
+      if (win.innerWidth <= 760) return; // Skip on mobile
+      if (e.target.closest('button, input, select, .ds-close-btn, .ds-header-icon, .ds-settings-dropdown')) return;
+
+      e.preventDefault();
+      _isDragMoving = true;
+      var startX = e.clientX;
+      var startY = e.clientY;
+      var initLeft = panel.offsetLeft;
+      var initTop = panel.offsetTop;
+
+      panel.style.transition = 'none';
+
+      function onMouseMove(me) {
+        if (!_isDragMoving) return;
+        var dx = me.clientX - startX;
+        var dy = me.clientY - startY;
+        var newLeft = Math.max(0, Math.min(win.innerWidth - panel.offsetWidth, initLeft + dx));
+        var newTop = Math.max(0, Math.min(win.innerHeight - 50, initTop + dy));
+
+        panel.style.left = newLeft + 'px';
+        panel.style.top = newTop + 'px';
+        panel.style.transform = 'none';
+      }
+
+      function onMouseUp() {
+        if (!_isDragMoving) return;
+        _isDragMoving = false;
+        win.removeEventListener('mousemove', onMouseMove);
+        win.removeEventListener('mouseup', onMouseUp);
+
+        if (!state.settings.pcWindow) state.settings.pcWindow = Object.assign({}, DEFAULT_SETTINGS.pcWindow);
+        if (!state.settings.pcWindow.floating) state.settings.pcWindow.floating = { left: null, top: null, width: 880, height: 720 };
+        state.settings.pcWindow.floating.left = panel.offsetLeft;
+        state.settings.pcWindow.floating.top = panel.offsetTop;
+        saveSettings();
+      }
+
+      win.addEventListener('mousemove', onMouseMove);
+      win.addEventListener('mouseup', onMouseUp);
+    });
+  }
+
+  // 2. Border Drag to Resize (PC Modes)
+  panel.addEventListener('mousedown', function (e) {
+    var handle = e.target.closest('.ds-resize-handle');
+    if (!handle) return;
+    var mode = state.settings.displayMode;
+    if (mode !== 'pc-floating' && mode !== 'pc-dock-left' && mode !== 'pc-dock-right') return;
+    if (win.innerWidth <= 760) return; // Skip on mobile
+
+    e.preventDefault();
+    _isResizing = true;
+    var dir = handle.getAttribute('data-dir');
+    var startX = e.clientX;
+    var startY = e.clientY;
+    var startWidth = panel.offsetWidth;
+    var startHeight = panel.offsetHeight;
+    var startLeft = panel.offsetLeft;
+
+    panel.style.transition = 'none';
+
+    function onMouseMove(me) {
+      if (!_isResizing) return;
+      var dx = me.clientX - startX;
+      var dy = me.clientY - startY;
+
+      if (mode === 'pc-floating') {
+        if (dir === 'se' || dir === 'e') {
+          var newW = Math.max(360, Math.min(win.innerWidth - startLeft, startWidth + dx));
+          panel.style.width = newW + 'px';
+        }
+        if (dir === 'se' || dir === 's') {
+          var newH = Math.max(400, Math.min(win.innerHeight - panel.offsetTop, startHeight + dy));
+          panel.style.height = newH + 'px';
+        }
+        if (dir === 'w') {
+          var newW2 = Math.max(360, startWidth - dx);
+          var newL2 = startLeft + (startWidth - newW2);
+          panel.style.width = newW2 + 'px';
+          panel.style.left = newL2 + 'px';
+        }
+      } else if (mode === 'pc-dock-left') {
+        if (dir === 'e' || dir === 'se') {
+          var newW3 = Math.max(320, Math.min(win.innerWidth * 0.85, startWidth + dx));
+          panel.style.width = newW3 + 'px';
+        }
+      } else if (mode === 'pc-dock-right') {
+        if (dir === 'w' || dir === 'se') {
+          var newW4 = Math.max(320, Math.min(win.innerWidth * 0.85, startWidth - dx));
+          panel.style.width = newW4 + 'px';
+        }
+      }
+    }
+
+    function onMouseUp() {
+      if (!_isResizing) return;
+      _isResizing = false;
+      win.removeEventListener('mousemove', onMouseMove);
+      win.removeEventListener('mouseup', onMouseUp);
+
+      if (!state.settings.pcWindow) state.settings.pcWindow = Object.assign({}, DEFAULT_SETTINGS.pcWindow);
+
+      if (mode === 'pc-floating') {
+        if (!state.settings.pcWindow.floating) state.settings.pcWindow.floating = {};
+        state.settings.pcWindow.floating.width = panel.offsetWidth;
+        state.settings.pcWindow.floating.height = panel.offsetHeight;
+        state.settings.pcWindow.floating.left = panel.offsetLeft;
+        state.settings.pcWindow.floating.top = panel.offsetTop;
+      } else if (mode === 'pc-dock-left') {
+        if (!state.settings.pcWindow.dockLeft) state.settings.pcWindow.dockLeft = {};
+        state.settings.pcWindow.dockLeft.width = panel.offsetWidth;
+      } else if (mode === 'pc-dock-right') {
+        if (!state.settings.pcWindow.dockRight) state.settings.pcWindow.dockRight = {};
+        state.settings.pcWindow.dockRight.width = panel.offsetWidth;
+      }
+      saveSettings();
+    }
+
+    win.addEventListener('mousemove', onMouseMove);
+    win.addEventListener('mouseup', onMouseUp);
+  });
+}
+
 function applyDisplayMode() {
   var mode = state.settings.displayMode || 'wand-modal';
-  var doc = getDoc();
+  var doc = getDoc(), win = getWin();
   var panel = doc.getElementById('ds-panel');
   if (panel) {
-    panel.classList.remove('ds-fullscreen','ds-qr-top','ds-qr-bottom','ds-qr-left','ds-qr-right');
-    if (mode === 'wand-fullscreen') panel.classList.add('ds-fullscreen');
-    else if (mode === 'qr-top')    panel.classList.add('ds-qr-top');
-    else if (mode === 'qr-bottom') panel.classList.add('ds-qr-bottom');
-    else if (mode === 'qr-left')   panel.classList.add('ds-qr-left');
-    else if (mode === 'qr-right')  panel.classList.add('ds-qr-right');
+    panel.classList.remove('ds-fullscreen','ds-qr-top','ds-qr-bottom','ds-qr-left','ds-qr-right','ds-pc-floating','ds-pc-dock-left','ds-pc-dock-right');
+    
+    // Clear inline positional styles
+    panel.style.left = '';
+    panel.style.right = '';
+    panel.style.top = '';
+    panel.style.bottom = '';
+    panel.style.width = '';
+    panel.style.height = '';
+    panel.style.transform = '';
+
+    var isPC = win.innerWidth > 760;
+
+    if (mode === 'wand-fullscreen') {
+      panel.classList.add('ds-fullscreen');
+    } else if (mode === 'qr-top') {
+      panel.classList.add('ds-qr-top');
+    } else if (mode === 'qr-bottom') {
+      panel.classList.add('ds-qr-bottom');
+    } else if (mode === 'qr-left') {
+      panel.classList.add('ds-qr-left');
+    } else if (mode === 'qr-right') {
+      panel.classList.add('ds-qr-right');
+    } else if (mode === 'pc-floating') {
+      panel.classList.add('ds-pc-floating');
+      if (isPC) {
+        var pcCfg = (state.settings.pcWindow && state.settings.pcWindow.floating) || { left: null, top: null, width: 880, height: 720 };
+        var w = Math.min(pcCfg.width || 880, win.innerWidth - 20);
+        var h = Math.min(pcCfg.height || 720, win.innerHeight - 20);
+        var l = pcCfg.left;
+        var t = pcCfg.top;
+        if (l === null || l === undefined || l > win.innerWidth - 100 || l < 0) {
+          l = Math.max(0, Math.floor((win.innerWidth - w) / 2));
+        }
+        if (t === null || t === undefined || t > win.innerHeight - 100 || t < 0) {
+          t = Math.max(0, Math.floor((win.innerHeight - h) / 2));
+        }
+        panel.style.width = w + 'px';
+        panel.style.height = h + 'px';
+        panel.style.left = l + 'px';
+        panel.style.top = t + 'px';
+        panel.style.transform = 'none';
+      }
+    } else if (mode === 'pc-dock-left') {
+      panel.classList.add('ds-pc-dock-left');
+      if (isPC) {
+        var pcCfgL = (state.settings.pcWindow && state.settings.pcWindow.dockLeft) || { width: 460 };
+        var wL = Math.min(pcCfgL.width || 460, win.innerWidth * 0.85);
+        panel.style.width = wL + 'px';
+        panel.style.left = '0px';
+        panel.style.top = '0px';
+        panel.style.bottom = '0px';
+        panel.style.height = '100vh';
+        panel.style.transform = 'none';
+      }
+    } else if (mode === 'pc-dock-right') {
+      panel.classList.add('ds-pc-dock-right');
+      if (isPC) {
+        var pcCfgR = (state.settings.pcWindow && state.settings.pcWindow.dockRight) || { width: 460 };
+        var wR = Math.min(pcCfgR.width || 460, win.innerWidth * 0.85);
+        panel.style.width = wR + 'px';
+        panel.style.right = '0px';
+        panel.style.left = 'auto';
+        panel.style.top = '0px';
+        panel.style.bottom = '0px';
+        panel.style.height = '100vh';
+        panel.style.transform = 'none';
+      }
+    }
   }
+
+  setupPCWindowInteractions();
+
   var wandBtn = doc.getElementById('ds_wand_container');
   if (wandBtn) {
-    if (mode === 'wand-modal' || mode === 'wand-fullscreen') wandBtn.style.setProperty('display', 'flex', 'important');
+    if (mode === 'wand-modal' || mode === 'wand-fullscreen' || mode.startsWith('pc-')) wandBtn.style.setProperty('display', 'flex', 'important');
     else wandBtn.style.setProperty('display', 'none', 'important');
   }
   ensureWalletButton();
@@ -1801,8 +2021,9 @@ function createUI() {
     '<details class="ds-dropdown-section">' +
       '<summary>界面入口及展示</summary>' +
       '<div class="ds-dropdown-section-content">' +
-        ['wand-modal:魔法棒菜单 (当前形式)','wand-fullscreen:魔法棒菜单 (全屏)','qr-bar:QR 栏 (普通弹窗)',
-         'qr-top:QR 栏 (自上方滑出)','qr-bottom:QR 栏 (自下方滑出)','qr-left:QR 栏 (自左侧滑出)','qr-right:QR 栏 (自右侧滑出)']
+        ['wand-modal:魔法棒菜单 (普通弹窗)','wand-fullscreen:魔法棒菜单 (全屏)',
+         'pc-floating:电脑端 悬浮窗 (可拖拽/缩放/记忆)','pc-dock-left:电脑端 左侧贴靠 (可调宽度/记忆)','pc-dock-right:电脑端 右侧贴靠 (可调宽度/记忆)',
+         'qr-bar:QR 栏 (普通弹窗)','qr-top:QR 栏 (自上方滑出)','qr-bottom:QR 栏 (自下方滑出)','qr-left:QR 栏 (自左侧滑出)','qr-right:QR 栏 (自右侧滑出)']
         .map(function (s) { var p2 = s.split(':'); return '<label class="ds-settings-dropdown-item"><input type="radio" name="ds-display-mode" value="' + p2[0] + '"><span>' + p2[1] + '</span></label>'; }).join('') +
       '</div>' +
     '</details>' +
