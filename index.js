@@ -781,13 +781,16 @@ async function loadCurrentSave() {
   } catch (e) { createNewSave(); }
 }
 
-function createNewSave() {
+function createNewSave(customName, isCustom) {
   var cn = ''; try { cn = getContext().name2 || ''; } catch (e) {}
   var n   = new Date();
-  var key = n.getFullYear() + String(n.getMonth() + 1).padStart(2, '0') + String(n.getDate()).padStart(2, '0') + '_' +
-            String(n.getHours()).padStart(2, '0') + String(n.getMinutes()).padStart(2, '0') + String(n.getSeconds()).padStart(2, '0') + '_' + (cn || 'unknown');
+  var defaultName = customName || (cn ? (cn + '_' + String(n.getMonth() + 1).padStart(2, '0') + String(n.getDate()).padStart(2, '0') + '_' + String(n.getHours()).padStart(2, '0') + String(n.getMinutes()).padStart(2, '0')) : ('存档_' + String(n.getMonth() + 1).padStart(2, '0') + String(n.getDate()).padStart(2, '0')));
+  var key = (isCustom ? 'custom_' : 'save_') + Date.now() + '_' + Math.random().toString(36).substring(2, 6);
   state.saves[key] = {
-    name: key, character: cn, startTime: n.getTime(),
+    name: defaultName,
+    isCustom: !!isCustom,
+    character: cn,
+    startTime: n.getTime(),
     total_tokens: 0, total_cost: 0, input_tokens: 0, output_tokens: 0,
     cache_hit_tokens: 0, cache_miss_tokens: 0, input_cost: 0, output_cost: 0,
     rounds: 0, history: [],
@@ -2213,7 +2216,18 @@ function bindUIControls(doc) {
 
   // Save management
   var btnNewSave = el('ds-btn-new-save');
-  if (btnNewSave) btnNewSave.onclick = function () { createNewSave(); refreshUI(); };
+  if (btnNewSave) {
+    btnNewSave.onclick = function () {
+      var cn = ''; try { cn = getContext().name2 || ''; } catch (e) {}
+      var n = new Date();
+      var defaultSuggest = cn ? (cn + '_' + String(n.getMonth() + 1).padStart(2, '0') + String(n.getDate()).padStart(2, '0')) : ('自建存档_' + String(n.getMonth() + 1).padStart(2, '0') + String(n.getDate()).padStart(2, '0'));
+      var inputName = prompt('新建自定义存档\n请输入存档名称：', defaultSuggest);
+      if (inputName === null) return;
+      var finalName = inputName.trim() || defaultSuggest;
+      createNewSave(finalName, true);
+      refreshUI();
+    };
+  }
 
   var btnDeleteSave = el('ds-btn-delete-save');
   if (btnDeleteSave) btnDeleteSave.onclick = async function () {
@@ -3139,15 +3153,45 @@ function refreshSaveSelect() {
   var select = doc.getElementById('ds-save-select');
   if (!select) return;
   var keys = Object.keys(state.saves);
-  var newHash = state.currentSave + '|' + keys.map(function (k) { return k + ':' + (state.saves[k].rounds || 0); }).join(',');
+  var newHash = state.currentSave + '|' + keys.map(function (k) { return k + ':' + (state.saves[k].rounds || 0) + ':' + (state.saves[k].name || '') + ':' + (state.saves[k].isCustom ? 1 : 0); }).join(',');
   if (newHash === _saveSelectHash) return;
   _saveSelectHash = newHash;
+
+  var customKeys = [];
+  var autoKeys = [];
+
+  keys.forEach(function (k) {
+    var s = state.saves[k];
+    if (s && (s.isCustom || (k && k.indexOf('custom_') === 0))) {
+      customKeys.push(k);
+    } else {
+      autoKeys.push(k);
+    }
+  });
+
+  customKeys.sort(function (a, b) { return (state.saves[b].startTime || 0) - (state.saves[a].startTime || 0); });
+  autoKeys.sort(function (a, b) { return (state.saves[b].startTime || 0) - (state.saves[a].startTime || 0); });
+
   var html = '<option value="__all__"' + (state.currentSave === '__all__' ? ' selected' : '') + '>全部存档 (合并统计)</option>';
-  keys.sort(function (a, b) { return (state.saves[b].startTime || 0) - (state.saves[a].startTime || 0); })
-      .forEach(function (k) {
-        var s = state.saves[k];
-        html += '<option value="' + k + '"' + (k === state.currentSave ? ' selected' : '') + '>' + s.name + ' (' + (s.rounds || 0) + '轮)</option>';
-      });
+
+  if (customKeys.length > 0) {
+    html += '<optgroup label="⭐ 自定义存档">';
+    customKeys.forEach(function (k) {
+      var s = state.saves[k];
+      html += '<option value="' + k + '"' + (k === state.currentSave ? ' selected' : '') + '>⭐ ' + escapeHTML(s.name) + ' (' + (s.rounds || 0) + '轮)</option>';
+    });
+    html += '</optgroup>';
+  }
+
+  if (autoKeys.length > 0) {
+    if (customKeys.length > 0) html += '<optgroup label="💬 聊天存档">';
+    autoKeys.forEach(function (k) {
+      var s = state.saves[k];
+      html += '<option value="' + k + '"' + (k === state.currentSave ? ' selected' : '') + '>' + escapeHTML(s.name) + ' (' + (s.rounds || 0) + '轮)</option>';
+    });
+    if (customKeys.length > 0) html += '</optgroup>';
+  }
+
   select.innerHTML = html;
 }
 
