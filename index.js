@@ -1618,40 +1618,60 @@ function patchFetch() {
         fetchResponseTime = Date.now();
         logDebug('收到响应, 状态码: ' + res.status);
 
-        // Spy on stream reader if available
-        if (res && res.body && typeof res.body.getReader === 'function') {
+        var decoder = new TextDecoder('utf-8');
+        var outRes = res;
+
+        // Spy on stream reader via Response tee / ReadableStream wrapper
+        if (res && res.body && typeof ReadableStream !== 'undefined') {
           try {
-            var origGetReader = res.body.getReader.bind(res.body);
-            var decoder = new TextDecoder('utf-8');
-            res.body.getReader = function () {
-              var reader = origGetReader();
-              return {
-                read: function () {
-                  return reader.read().then(function (result) {
-                    if (!result.done && result.value) {
+            var reader = res.body.getReader();
+            var stream = new ReadableStream({
+              start: function (controller) {
+                function push() {
+                  reader.read().then(function (result) {
+                    if (result.done) {
+                      controller.close();
+                      return;
+                    }
+                    var chunk = result.value;
+                    if (chunk) {
+                      var now = Date.now();
                       try {
-                        var chunkStr = decoder.decode(result.value, { stream: true });
-                        if (chunkStr && (chunkStr.indexOf('"delta"') !== -1 || chunkStr.indexOf('"content"') !== -1 || chunkStr.indexOf('reasoning') !== -1)) {
-                          var now = Date.now();
+                        var chunkStr = decoder.decode(chunk, { stream: true });
+                        if (chunkStr) {
                           if (firstTokenTime === null) firstTokenTime = now;
-                          if (chunkStr.indexOf('reasoning_content') !== -1 || chunkStr.indexOf('"reasoning"') !== -1 || chunkStr.indexOf('"thought"') !== -1) {
+                          var isReasoning = chunkStr.indexOf('reasoning_content') !== -1 ||
+                                            chunkStr.indexOf('"reasoning"') !== -1 ||
+                                            chunkStr.indexOf('"thought"') !== -1 ||
+                                            chunkStr.indexOf('<think>') !== -1 ||
+                                            chunkStr.indexOf('</think>') !== -1;
+                          if (isReasoning) {
                             if (reasoningStartTime === null) reasoningStartTime = now;
                             reasoningEndTime = now;
                           }
                         }
                       } catch (err) {}
+                      controller.enqueue(chunk);
                     }
-                    return result;
+                    push();
+                  }).catch(function (err) {
+                    controller.error(err);
                   });
-                },
-                cancel: function (r) { return reader.cancel(r); },
-                releaseLock: function () { return reader.releaseLock(); }
-              };
-            };
-          } catch (e) {}
+                }
+                push();
+              }
+            });
+            outRes = new Response(stream, {
+              status: res.status,
+              statusText: res.statusText,
+              headers: res.headers
+            });
+          } catch (e) {
+            logDebug('拦截流式 Reader 失败: ' + e.message);
+          }
         }
 
-        var clone = res.clone();
+        var clone = outRes.clone();
         clone.text().then(function (text) {
           try {
             var endTime = Date.now();
@@ -1686,10 +1706,21 @@ function patchFetch() {
             }
 
             var durationSec = Math.max(0.1, (endTime - startTime) / 1000);
-            var ttftSec = firstTokenTime ? Math.max(0, (firstTokenTime - startTime) / 1000) : (fetchResponseTime ? Math.max(0, (fetchResponseTime - startTime) / 1000) : 0);
-            var reasoningDurationSec = (reasoningStartTime && reasoningEndTime) ? Math.max(0, (reasoningEndTime - reasoningStartTime) / 1000) : 0;
+            var ttftSec = firstTokenTime ? Math.max(0.1, (firstTokenTime - startTime) / 1000) : (fetchResponseTime ? Math.max(0.1, (fetchResponseTime - startTime) / 1000) : 0.5);
+            var reasoningDurationSec = (reasoningStartTime && reasoningEndTime) ? Math.max(0.1, (reasoningEndTime - reasoningStartTime) / 1000) : 0;
             var compTokens = (data && data.usage && data.usage.completion_tokens) || 0;
             var reasoningTk = (data && data.usage && data.usage.completion_tokens_details && data.usage.completion_tokens_details.reasoning_tokens) || (data && data.usage && data.usage.reasoning_tokens) || reasoningTokensFound || 0;
+
+            // Intelligent Fallback Estimation:
+            // 1. TTFT fallback if 0
+            if (!ttftSec || ttftSec <= 0) {
+              ttftSec = fetchResponseTime ? Math.max(0.1, (fetchResponseTime - startTime) / 1000) : 0.5;
+            }
+            // 2. Reasoning duration fallback if reasoning tokens exist but duration wasn't stream-measured
+            if (reasoningTk > 0 && (reasoningDurationSec <= 0 || reasoningDurationSec < 0.1) && compTokens > 0) {
+              var estimatedReasoningRatio = Math.min(1, reasoningTk / Math.max(1, compTokens));
+              reasoningDurationSec = parseFloat((estimatedReasoningRatio * durationSec).toFixed(1));
+            }
             var speedVal = compTokens > 0 ? (compTokens / durationSec) : 0;
 
             var extraMetrics = {
@@ -1717,7 +1748,7 @@ function patchFetch() {
         }).catch(function (e) {
           logDebug('读取克隆响应 text 失败: ' + e.message);
         });
-        return res;
+        return outRes;
       });
     }
     return rawFetch.apply(p, args);
