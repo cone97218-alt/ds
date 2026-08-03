@@ -82,6 +82,9 @@ var DEFAULT_SETTINGS = {
     'min-turn-cost': false,
     'max-turn-tokens': false,
     'min-turn-tokens': false,
+    'avg-duration': false,
+    'avg-speed': false,
+    'reasoning-stats': false,
   },
   channels: [],          // populated by initDefaultChannels()
   balanceLayout: 'vertical', // 'vertical' | 'horizontal'
@@ -271,11 +274,11 @@ var PANEL_HTML = `
           <div id="ds-stat-hit-miss-ratio-sub" class="ds-card-sub" style="margin-top:2px;">输出 0 token</div>
         </div>
         <div style="flex:1; margin:0 16px; display:flex; flex-direction:column; gap:4px; min-width:0;">
-          <div id="ds-hit-miss-bar-bg" style="background:rgba(255,255,255,0.06); border-radius:4px; height:6px; overflow:hidden; display:flex;">
+          <div id="ds-hit-miss-bar-bg" style="background:var(--SmartThemeBlurTintColor); border-radius:4px; height:6px; overflow:hidden; display:flex;">
             <div id="ds-hit-miss-bar-hit"  style="background:var(--SmartThemeQuoteColor); width:0%; height:100%; transition:width 0.3s;"></div>
             <div id="ds-hit-miss-bar-miss" style="background:var(--SmartThemeUnderlineColor); width:0%; height:100%; transition:width 0.3s;"></div>
           </div>
-          <div style="display:flex; justify-content:space-between; font-size:9px; color:var(--SmartThemeEmColor, #9ca3af);">
+          <div style="display:flex; justify-content:space-between; font-size:9px; color:var(--SmartThemeEmColor);">
             <span id="ds-hit-miss-lbl-hit">命中: 0.0%</span>
             <span id="ds-hit-miss-lbl-miss">未命中: 0.0%</span>
           </div>
@@ -313,6 +316,21 @@ var PANEL_HTML = `
         <div class="ds-card-title">单轮最小 Tokens</div>
         <div class="ds-card-val"><span id="ds-stat-min-turn-tokens">0</span></div>
         <div id="ds-stat-min-turn-tokens-sub" class="ds-card-sub">暂无数据</div>
+      </div>
+      <div id="ds-stat-card-avg-duration" class="ds-card">
+        <div class="ds-card-title"><i class="fa-solid fa-clock" style="margin-right:4px;color:var(--SmartThemeUnderlineColor);"></i>平均耗时</div>
+        <div class="ds-card-val"><span id="ds-stat-avg-duration">0.0s</span></div>
+        <div id="ds-stat-avg-duration-sub" class="ds-card-sub">平均首延 0.0s</div>
+      </div>
+      <div id="ds-stat-card-avg-speed" class="ds-card">
+        <div class="ds-card-title"><i class="fa-solid fa-gauge-high" style="margin-right:4px;color:var(--SmartThemeQuoteColor);"></i>平均速率</div>
+        <div class="ds-card-val"><span id="ds-stat-avg-speed">0 t/s</span></div>
+        <div id="ds-stat-avg-speed-sub" class="ds-card-sub">暂无数据</div>
+      </div>
+      <div id="ds-stat-card-reasoning-stats" class="ds-card">
+        <div class="ds-card-title"><i class="fa-solid fa-brain" style="margin-right:4px;color:var(--SmartThemeUnderlineColor);"></i>思维链统计</div>
+        <div class="ds-card-val"><span id="ds-stat-reasoning-stats">0 tk/轮</span></div>
+        <div id="ds-stat-reasoning-stats-sub" class="ds-card-sub">平均耗时 0.0s</div>
       </div>
     </div>
   </div>
@@ -504,7 +522,7 @@ function applyStatsVisibility() {
       'total-cost','hit-rate','avg-cost','savings','input-cost','output-cost',
       'total-tokens','hit-tokens','miss-tokens','rounds-count','max-turn-cost','avg-turn-tokens',
       'latest-hit-rate','hit-miss-ratio','avg-input-tokens','avg-output-tokens','savings-rate',
-      'min-turn-cost','max-turn-tokens','min-turn-tokens'
+      'min-turn-cost','max-turn-tokens','min-turn-tokens','avg-duration','avg-speed','reasoning-stats'
     ];
     keys.forEach(function (k) {
       var el = doc.getElementById('ds-stat-card-' + k);
@@ -526,7 +544,7 @@ function renderStatsCustomizerSettings(doc) {
       'total-cost','hit-rate','avg-cost','savings','input-cost','output-cost',
       'total-tokens','hit-tokens','miss-tokens','rounds-count','max-turn-cost','avg-turn-tokens',
       'latest-hit-rate','hit-miss-ratio','avg-input-tokens','avg-output-tokens','savings-rate',
-      'min-turn-cost','max-turn-tokens','min-turn-tokens'
+      'min-turn-cost','max-turn-tokens','min-turn-tokens','avg-duration','avg-speed','reasoning-stats'
     ];
     var names = {
       'total-cost':'总消耗','hit-rate':'加权缓存命中率','avg-cost':'平均每轮','savings':'预计节省',
@@ -534,7 +552,8 @@ function renderStatsCustomizerSettings(doc) {
       'miss-tokens':'未命中Tokens','rounds-count':'对话轮数','max-turn-cost':'单轮最大','avg-turn-tokens':'单轮平均',
       'latest-hit-rate':'最新命中率','hit-miss-ratio':'命中 / 未命中','avg-input-tokens':'单轮平均输入',
       'avg-output-tokens':'单轮平均输出','savings-rate':'节省比例','min-turn-cost':'单轮最小',
-      'max-turn-tokens':'单轮最大 Tokens','min-turn-tokens':'单轮最小 Tokens'
+      'max-turn-tokens':'单轮最大 Tokens','min-turn-tokens':'单轮最小 Tokens',
+      'avg-duration':'平均耗时','avg-speed':'平均速率','reasoning-stats':'思维链统计'
     };
     keys.forEach(function (key) {
       var lbl = doc.createElement('label');
@@ -567,7 +586,7 @@ function renderModuleOrderSettings(doc) {
     order.forEach(function (key, index) {
       var row = doc.createElement('div');
       row.className = 'ds-flex-between';
-      row.style.cssText = 'background:rgba(255,255,255,0.03);padding:4px 6px;border-radius:6px;border:1px solid var(--SmartThemeBorderColor,#374151);font-size:12px;align-items:center;margin-bottom:4px;gap:6px;';
+      row.style.cssText = 'background:var(--SmartThemeBlurTintColor);padding:4px 6px;border-radius:6px;border:1px solid var(--SmartThemeBorderColor);font-size:12px;align-items:center;margin-bottom:4px;gap:6px;';
       var lbl = doc.createElement('label');
       lbl.style.cssText = 'display:flex;align-items:center;gap:6px;cursor:pointer;margin:0;flex:1;min-width:0;';
       var chk = doc.createElement('input');
@@ -1117,7 +1136,7 @@ function createTextHash(text) {
 }
 
 // ─── Usage processing ─────────────────────────────────────────────────────────
-async function processUsage(usage, model, isDebug, messages, requestId, apiKey) {
+async function processUsage(usage, model, isDebug, messages, requestId, apiKey, extraMetrics) {
   logDebug('开始处理用量统计: model=' + model + ', isDebug=' + isDebug);
   var modelName = (model && model.trim()) ? model.trim() : '';
   if (!modelName && !isDebug) { try { modelName = getContext().model || ''; } catch (e) {} }
@@ -1136,7 +1155,9 @@ async function processUsage(usage, model, isDebug, messages, requestId, apiKey) 
   var comp  = usage.completion_tokens || 0;
   var total = usage.total_tokens || (hit + miss + comp);
 
-  logDebug('用量详情: hit=' + hit + ', miss=' + miss + ', comp=' + comp + ', total=' + total);
+  var reasoningTk = (usage.completion_tokens_details && usage.completion_tokens_details.reasoning_tokens) || usage.reasoning_tokens || (extraMetrics ? extraMetrics.reasoning_tokens : 0) || 0;
+
+  logDebug('用量详情: hit=' + hit + ', miss=' + miss + ', comp=' + comp + ', total=' + total + ', reasoning_tokens=' + reasoningTk);
 
   // Deduplication
   if (requestId) {
@@ -1189,29 +1210,43 @@ async function processUsage(usage, model, isDebug, messages, requestId, apiKey) 
   s.output_cost       += lu.cost.output;
   s.rounds            += 1;
 
+  var durationVal = extraMetrics ? (extraMetrics.duration || 0) : 0;
+  var speedVal    = extraMetrics ? (extraMetrics.speed || (comp > 0 && durationVal > 0 ? (comp / durationVal) : 0)) : (comp > 0 && durationVal > 0 ? (comp / durationVal) : 0);
+
   s.history.unshift({
-    timestamp:         lu.timestamp,
-    model:             lu.model,
-    prompt_tokens:     lu.prompt_tokens,
-    cache_hit_tokens:  lu.prompt_cache_hit_tokens,
-    cache_miss_tokens: lu.prompt_cache_miss_tokens,
-    completion_tokens: lu.completion_tokens,
-    total_tokens:      lu.total_tokens,
-    input_cost:        lu.cost.input,
-    output_cost:       lu.cost.output,
-    cost:              lu.cost.total,
-    pricingType:       lu.cost.pricingType,
-    channelId:         lu.cost.channelId,
-    channelName:       lu.cost.channelName,
-    ruleName:          lu.cost.ruleName,
-    hitPrice:          lu.cost.hitPrice,
-    missPrice:         lu.cost.missPrice,
-    cache_hit_rate:    lu.prompt_tokens > 0 ? (lu.prompt_cache_hit_tokens / lu.prompt_tokens * 100) : 0,
-    messages:          messages || [],
+    timestamp:          lu.timestamp,
+    model:              lu.model,
+    prompt_tokens:      lu.prompt_tokens,
+    cache_hit_tokens:   lu.prompt_cache_hit_tokens,
+    cache_miss_tokens:  lu.prompt_cache_miss_tokens,
+    completion_tokens:  lu.completion_tokens,
+    total_tokens:       lu.total_tokens,
+    input_cost:         lu.cost.input,
+    output_cost:        lu.cost.output,
+    cost:               lu.cost.total,
+    pricingType:        lu.cost.pricingType,
+    channelId:          lu.cost.channelId,
+    channelName:        lu.cost.channelName,
+    ruleName:           lu.cost.ruleName,
+    hitPrice:           lu.cost.hitPrice,
+    missPrice:          lu.cost.missPrice,
+    cache_hit_rate:     lu.prompt_tokens > 0 ? (lu.prompt_cache_hit_tokens / lu.prompt_tokens * 100) : 0,
+    messages:           messages || [],
+
+    // Extended performance metrics
+    duration:           durationVal,
+    ttft:               extraMetrics ? (extraMetrics.ttft || 0) : 0,
+    reasoning_duration: extraMetrics ? (extraMetrics.reasoning_duration || 0) : 0,
+    reasoning_tokens:   reasoningTk,
+    speed:              speedVal,
+    request_body:       extraMetrics ? extraMetrics.request_body : null,
+    full_response:      extraMetrics ? extraMetrics.full_response : null,
   });
 
   for (var i = 10; i < s.history.length; i++) {
     if (s.history[i].messages) delete s.history[i].messages;
+    if (s.history[i].request_body) delete s.history[i].request_body;
+    if (s.history[i].full_response) delete s.history[i].full_response;
   }
   if (s.history.length > 1000) s.history = s.history.slice(0, 1000);
 
@@ -1413,7 +1448,7 @@ function updateDynamicThemeColors() {
     var panel = doc.getElementById('ds-panel');
     if (!panel) return;
     var temp = doc.createElement('div');
-    temp.style.color = 'var(--SmartThemeBlurTintColor, #080d14)';
+    temp.style.color = 'var(--SmartThemeBlurTintColor)';
     doc.body.appendChild(temp);
     var color = p.getComputedStyle(temp).color;
     doc.body.removeChild(temp);
@@ -1438,9 +1473,9 @@ function updateDynamicThemeColors() {
       }
     }
     panel.style.setProperty('--ds-bg-opaque', opaqueColor);
-    panel.style.setProperty('--ds-text-color', 'var(--SmartThemeBodyColor, #f3f4f6)');
-    panel.style.setProperty('--ds-border-color', 'var(--SmartThemeBorderColor, #374151)');
-    panel.style.setProperty('--ds-shadow-color', 'var(--SmartThemeShadowColor, rgba(0,0,0,0.5))');
+    panel.style.setProperty('--ds-text-color', 'var(--SmartThemeBodyColor)');
+    panel.style.setProperty('--ds-border-color', 'var(--SmartThemeBorderColor)');
+    panel.style.setProperty('--ds-shadow-color', 'var(--SmartThemeShadowColor)');
   } catch (e) { console.warn('[DS] updateDynamicThemeColors:', e); }
 }
 
@@ -1479,9 +1514,9 @@ function ensureWalletButton() {
   btn.innerHTML = '<i class="fa-solid fa-wallet"></i>';
   btn.style.setProperty('display', 'inline-flex', 'important');
   btn.style.alignItems = 'center'; btn.style.justifyContent = 'center';
-  btn.style.color = 'var(--SmartThemeBodyColor, #f3f4f6)';
+  btn.style.color = 'var(--SmartThemeBodyColor)';
   btn.style.transition = 'background-color 0.2s, transform 0.1s';
-  btn.addEventListener('mouseenter', function () { btn.style.background = 'rgba(255,255,255,0.15)'; btn.style.transform = 'scale(1.05)'; });
+  btn.addEventListener('mouseenter', function () { btn.style.background = 'var(--SmartThemeBorderColor)'; btn.style.transform = 'scale(1.05)'; });
   btn.addEventListener('mouseleave', function () { btn.style.background = 'transparent'; btn.style.transform = 'scale(1)'; });
   btn.addEventListener('click', function (e) { e.preventDefault(); e.stopPropagation(); togglePanel(); });
   btnContainer.appendChild(btn);
@@ -1527,6 +1562,12 @@ function patchFetch() {
     var url = typeof args[0] === 'string' ? args[0] : (args[0] && args[0].url);
     if (url && url.indexOf(TARGET_API) !== -1) {
       logDebug('拦截到 API 请求: ' + url);
+      var startTime = Date.now();
+      var firstTokenTime = null;
+      var reasoningStartTime = null;
+      var reasoningEndTime = null;
+      var fetchResponseTime = null;
+
       var capturedMessages = null;
       var req = null;
       try {
@@ -1552,18 +1593,71 @@ function patchFetch() {
           completion_tokens:        state.settings.debugOutput,
           total_tokens: state.settings.debugHit + state.settings.debugMiss + state.settings.debugOutput,
         };
-        setTimeout(function () { processUsage(fakeUsage, state.settings.debugModel, true, capturedMessages, 'debug-' + Date.now(), ''); }, 100);
+        var fakeExtra = {
+          duration: 7.0,
+          ttft: 1.2,
+          reasoning_duration: 5.7,
+          reasoning_tokens: 372,
+          speed: 53,
+          request_body: req || { type: 'normal', messages: capturedMessages || [] },
+          full_response: {
+            id: 'f93b442b-351a-4136-8660-1178eae15ba6',
+            object: 'chat.completion.chunk',
+            created: Math.floor(Date.now() / 1000),
+            model: state.settings.debugModel || 'deepseek-v4-flash',
+            choices: [{ message: { role: 'assistant', content: 'Debug response' } }],
+            usage: fakeUsage
+          }
+        };
+        setTimeout(function () { processUsage(fakeUsage, state.settings.debugModel, true, capturedMessages, 'debug-' + Date.now(), '', fakeExtra); }, 100);
         return rawFetch.apply(p, args);
       }
 
       logDebug('发送真实 Fetch 请求至服务器...');
       return rawFetch.apply(p, args).then(function (res) {
+        fetchResponseTime = Date.now();
         logDebug('收到响应, 状态码: ' + res.status);
+
+        // Spy on stream reader if available
+        if (res && res.body && typeof res.body.getReader === 'function') {
+          try {
+            var origGetReader = res.body.getReader.bind(res.body);
+            var decoder = new TextDecoder('utf-8');
+            res.body.getReader = function () {
+              var reader = origGetReader();
+              return {
+                read: function () {
+                  return reader.read().then(function (result) {
+                    if (!result.done && result.value) {
+                      try {
+                        var chunkStr = decoder.decode(result.value, { stream: true });
+                        if (chunkStr && (chunkStr.indexOf('"delta"') !== -1 || chunkStr.indexOf('"content"') !== -1 || chunkStr.indexOf('reasoning') !== -1)) {
+                          var now = Date.now();
+                          if (firstTokenTime === null) firstTokenTime = now;
+                          if (chunkStr.indexOf('reasoning_content') !== -1 || chunkStr.indexOf('"reasoning"') !== -1 || chunkStr.indexOf('"thought"') !== -1) {
+                            if (reasoningStartTime === null) reasoningStartTime = now;
+                            reasoningEndTime = now;
+                          }
+                        }
+                      } catch (err) {}
+                    }
+                    return result;
+                  });
+                },
+                cancel: function (r) { return reader.cancel(r); },
+                releaseLock: function () { return reader.releaseLock(); }
+              };
+            };
+          } catch (e) {}
+        }
+
         var clone = res.clone();
         clone.text().then(function (text) {
           try {
+            var endTime = Date.now();
             logDebug('读取响应体 text 成功 (长度: ' + text.length + ')');
             var data = null, trimmed = text.trim(), resId = '';
+            var reasoningTokensFound = 0;
             if (trimmed.startsWith('{')) {
               data = JSON.parse(trimmed);
               if (data && data.id) resId = data.id;
@@ -1580,16 +1674,40 @@ function patchFetch() {
                       data = chunk;
                       logDebug('SSE 流中提取到 usage 数据');
                     }
+                    if (chunk.choices && chunk.choices[0] && chunk.choices[0].delta) {
+                      var d = chunk.choices[0].delta;
+                      if (d.reasoning_content || d.reasoning || d.thought) {
+                        reasoningTokensFound++;
+                      }
+                    }
                   } catch (e) {}
                 }
               });
             }
+
+            var durationSec = Math.max(0.1, (endTime - startTime) / 1000);
+            var ttftSec = firstTokenTime ? Math.max(0, (firstTokenTime - startTime) / 1000) : (fetchResponseTime ? Math.max(0, (fetchResponseTime - startTime) / 1000) : 0);
+            var reasoningDurationSec = (reasoningStartTime && reasoningEndTime) ? Math.max(0, (reasoningEndTime - reasoningStartTime) / 1000) : 0;
+            var compTokens = (data && data.usage && data.usage.completion_tokens) || 0;
+            var reasoningTk = (data && data.usage && data.usage.completion_tokens_details && data.usage.completion_tokens_details.reasoning_tokens) || (data && data.usage && data.usage.reasoning_tokens) || reasoningTokensFound || 0;
+            var speedVal = compTokens > 0 ? (compTokens / durationSec) : 0;
+
+            var extraMetrics = {
+              duration:           durationSec,
+              ttft:               ttftSec,
+              reasoning_duration: reasoningDurationSec,
+              reasoning_tokens:   reasoningTk,
+              speed:              speedVal,
+              request_body:       req || { type: 'normal', messages: capturedMessages || [] },
+              full_response:      data || text
+            };
+
             if (data && data.usage) {
               var source = req && req.chat_completion_source;
               logDebug('请求来源 backend: ' + source);
               var apiKey = getActiveAPIKey(source);
               logDebug('获取当前 backend 的 API 秘钥: ' + (apiKey ? '有 (长度:' + apiKey.length + ')' : '无'));
-              processUsage(data.usage, data.model || '', false, capturedMessages, resId, apiKey);
+              processUsage(data.usage, data.model || '', false, capturedMessages, resId, apiKey, extraMetrics);
             } else {
               logDebug('未匹配到有效的 usage 数据');
             }
@@ -1692,10 +1810,10 @@ function createUI() {
     '<details class="ds-dropdown-section">' +
       '<summary>运行日志</summary>' +
       '<div class="ds-dropdown-section-content">' +
-        '<pre id="ds-debug-log-content" style="margin:0;padding:6px;font-family:monospace;font-size:10px;background:rgba(0,0,0,0.2);color:#9ca3af;border-radius:4px;white-space:pre-wrap;word-break:break-all;max-height:150px;overflow-y:auto;user-select:text;"></pre>' +
+        '<pre id="ds-debug-log-content" style="margin:0;padding:6px;font-family:monospace;font-size:10px;background:var(--SmartThemeBlurTintColor);color: var(--SmartThemeEmColor);border-radius:4px;white-space:pre-wrap;word-break:break-all;max-height:150px;overflow-y:auto;user-select:text;"></pre>' +
       '</div>' +
     '</details>' +
-    '<div style="margin:8px 0;border-top:1px solid var(--SmartThemeBorderColor,#374151);"></div>' +
+    '<div style="margin:8px 0;border-top:1px solid var(--SmartThemeBorderColor);"></div>' +
     '<button id="ds-btn-show-help" class="ds-btn ds-btn-sm ds-btn-normal" style="width:100%;display:flex;align-items:center;justify-content:center;gap:6px;">' +
       '<i class="fa-solid fa-circle-question"></i> 使用说明 &amp; 版本' +
     '</button>';
@@ -1962,14 +2080,14 @@ function renderChannelBlock(ch) {
 
   var canQuery = ch.balanceQueryType === 'deepseek' || ch.balanceQueryType === 'openai';
 
-  var html = '<div class="ds-ch-block" data-chid="' + chId + '" style="border:1px solid var(--SmartThemeBorderColor,#374151);border-left:3px solid ' + color + ';border-radius:6px;margin-bottom:8px;overflow:hidden;">';
+  var html = '<div class="ds-ch-block" data-chid="' + chId + '" style="border:1px solid var(--SmartThemeBorderColor);border-left:3px solid ' + color + ';border-radius:6px;margin-bottom:8px;overflow:hidden;">';
 
   // Channel header (click to collapse)
-  html += '<div class="ds-ch-header" style="padding:6px 8px;display:flex;align-items:center;justify-content:space-between;background:rgba(255,255,255,0.03);cursor:pointer;" data-chid="' + chId + '">';
+  html += '<div class="ds-ch-header" style="padding:6px 8px;display:flex;align-items:center;justify-content:space-between;background:var(--SmartThemeBlurTintColor);cursor:pointer;" data-chid="' + chId + '">';
   html += '<div style="display:flex;align-items:center;gap:6px;">';
   html += '<span style="width:8px;height:8px;border-radius:50%;background:' + color + ';display:inline-block;flex-shrink:0;"></span>';
   html += '<span style="font-size:12px;font-weight:600;color:var(--SmartThemeBodyColor)">' + escapeHTML(ch.name) + '</span>';
-  if (ch.isDefault) html += '<span style="font-size:9px;padding:1px 4px;border-radius:3px;background:rgba(99,102,241,0.2);color:#818cf8;">系统默认</span>';
+  if (ch.isDefault) html += '<span style="font-size:9px;padding:1px 4px;border-radius:3px;background:var(--SmartThemeBlurTintColor);color:var(--SmartThemeUnderlineColor);">系统默认</span>';
   html += '</div>';
   html += '<div style="display:flex;align-items:center;gap:6px;">';
   html += '<span style="font-size:10px;color:var(--SmartThemeEmColor)">' + escapeHTML(balText) + '</span>';
@@ -2053,7 +2171,7 @@ function renderChannelBlock(ch) {
   html += '<div class="ds-ch-rule-form" data-chid="' + chId + '" style="display:none;margin-top:6px;"></div>';
 
   // Channel rename + color
-  html += '<div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--SmartThemeBorderColor,#374151);">';
+  html += '<div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--SmartThemeBorderColor);">';
   html += '<div style="display:flex;gap:4px;margin-bottom:4px;">';
   html += '<input type="text" class="ds-input ds-ch-rename" data-chid="' + chId + '" value="' + escapeHTML(ch.name) + '" placeholder="渠道名称" style="height:24px;padding:3px 6px;font-size:11px;flex:1;min-width:0;">';
   html += '<input type="color" class="ds-ch-color-pick" data-chid="' + chId + '" value="' + (ch.color || '#6366f1') + '" style="width:28px;height:24px;padding:1px;border:none;background:transparent;cursor:pointer;">';
@@ -2103,7 +2221,7 @@ function renderRuleRow(chId, rule) {
                   
     if (isPeakNow) {
       pricesHtml = '<span style="color:var(--SmartThemeEmColor);text-decoration:line-through;opacity:0.6;margin-right:6px;">' + escapeHTML(offStr) + '</span>' +
-                   '<span style="color:#f97316;font-weight:600;">' + escapeHTML(peakStr) + ' ⚡ 高峰中</span>';
+                   '<span style="color:var(--SmartThemeQuoteColor);font-weight:600;">' + escapeHTML(peakStr) + ' ⚡ 高峰中</span>';
     } else {
       pricesHtml = '<span style="color:var(--SmartThemeQuoteColor);font-weight:600;">' + escapeHTML(offStr) + ' ✓ 活跃</span>' +
                    '<span style="color:var(--SmartThemeEmColor);opacity:0.6;margin-left:6px;">' + escapeHTML(peakStr) + '</span>';
@@ -2112,14 +2230,14 @@ function renderRuleRow(chId, rule) {
     pricesHtml = 'h¥' + rule.hit + ' m¥' + rule.miss + ' o¥' + rule.output;
   }
 
-  var html = '<div class="ds-rule-row" data-chid="' + cid + '" data-ruleid="' + ruleId + '" style="display:flex;align-items:center;gap:4px;padding:3px 0;font-size:11px;border-bottom:1px solid rgba(255,255,255,0.04);">';
+  var html = '<div class="ds-rule-row" data-chid="' + cid + '" data-ruleid="' + ruleId + '" style="display:flex;align-items:center;gap:4px;padding:3px 0;font-size:11px;border-bottom:1px solid var(--SmartThemeBlurTintColor);">';
   html += '<input type="checkbox" class="ds-rule-toggle" data-chid="' + cid + '" data-ruleid="' + ruleId + '"' + (rule.enabled ? ' checked' : '') + ' style="flex-shrink:0;">';
   html += '<div style="flex:1;min-width:0;">';
   html += '<div style="font-weight:500;color:var(--SmartThemeBodyColor);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="' + escapeHTML(rule.pattern) + '">' + escapeHTML(rule.label || rule.pattern) + '</div>';
   html += '<div style="font-size:9px;color:var(--SmartThemeEmColor);">' + pricesHtml + '</div>';
   html += '</div>';
   if (rule.isDefault) {
-    html += '<span style="font-size:9px;padding:1px 3px;border-radius:2px;background:rgba(99,102,241,0.15);color:#818cf8;flex-shrink:0;">预置</span>';
+    html += '<span style="font-size:9px;padding:1px 3px;border-radius:2px;background:var(--SmartThemeBlurTintColor);color:var(--SmartThemeUnderlineColor);flex-shrink:0;">预置</span>';
   } else {
     html += '<button class="ds-btn ds-btn-sm ds-btn-normal ds-rule-edit" data-chid="' + cid + '" data-ruleid="' + ruleId + '" style="padding:1px 6px;font-size:10px;flex-shrink:0;">编辑</button>';
     html += '<button class="ds-btn ds-btn-sm ds-btn-danger ds-rule-delete" data-chid="' + cid + '" data-ruleid="' + ruleId + '" style="padding:1px 6px;font-size:10px;flex-shrink:0;">删除</button>';
@@ -2138,10 +2256,10 @@ function renderRuleForm(chId, existingRule) {
   var offMiss = hasPeak ? r.offpeak.miss : r.miss;
   var offOutput = hasPeak ? r.offpeak.output : r.output;
 
-  var html = '<div style="background:rgba(255,255,255,0.03);border:1px solid var(--SmartThemeBorderColor,#374151);border-radius:6px;padding:8px;">';
+  var html = '<div style="background:var(--SmartThemeBlurTintColor);border:1px solid var(--SmartThemeBorderColor);border-radius:6px;padding:8px;">';
   html += '<div style="font-size:10px;font-weight:600;color:var(--SmartThemeBodyColor);margin-bottom:6px;">' + (existingRule ? '编辑规则' : '添加规则') + '</div>';
   html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;margin-bottom:6px;">';
-  html += '<div><div style="font-size:9px;color:var(--SmartThemeEmColor);margin-bottom:2px;">匹配关键字 <span style="color:#f87171">*</span></div>' +
+  html += '<div><div style="font-size:9px;color:var(--SmartThemeEmColor);margin-bottom:2px;">匹配关键字 <span style="color:var(--SmartThemeEmColor)">*</span></div>' +
           '<input type="text" id="ds-rf-pattern" class="ds-input-compact" value="' + escapeHTML(r.pattern) + '" placeholder="如: gpt-4o" style="height:22px;padding:2px 4px;font-size:11px;width:100%;box-sizing:border-box;"></div>';
   html += '<div><div style="font-size:9px;color:var(--SmartThemeEmColor);margin-bottom:2px;">显示名称 (可选)</div>' +
           '<input type="text" id="ds-rf-label" class="ds-input-compact" value="' + escapeHTML(r.label || '') + '" placeholder="如: GPT-4o" style="height:22px;padding:2px 4px;font-size:11px;width:100%;box-sizing:border-box;"></div>';
@@ -2171,7 +2289,7 @@ function renderRuleForm(chId, existingRule) {
   html += '<div><div style="font-size:8px;color:var(--SmartThemeEmColor);margin-bottom:1px;">输出</div>' +
           '<input type="number" step="any" id="ds-rf-off-output" class="ds-input-compact" value="' + offOutput + '" style="height:20px;padding:1px 3px;font-size:10px;width:100%;box-sizing:border-box;"></div>';
   html += '</div>';
-  html += '<div style="font-size:9px;font-weight:600;color:#f97316;margin-bottom:2px;">高峰时段价格 (CNY/1M)</div>';
+  html += '<div style="font-size:9px;font-weight:600;color:var(--SmartThemeQuoteColor);margin-bottom:2px;">高峰时段价格 (CNY/1M)</div>';
   html += '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:4px;margin-bottom:4px;">';
   html += '<div><div style="font-size:8px;color:var(--SmartThemeEmColor);margin-bottom:1px;">命中</div>' +
           '<input type="number" step="any" id="ds-rf-peak-hit" class="ds-input-compact" value="' + peakHit + '" style="height:20px;padding:1px 3px;font-size:10px;width:100%;box-sizing:border-box;"></div>';
@@ -2182,7 +2300,7 @@ function renderRuleForm(chId, existingRule) {
   html += '</div>';
   html += '</div>';
 
-  html += '<div id="ds-rf-error" style="font-size:10px;color:#f87171;min-height:14px;margin-bottom:4px;"></div>';
+  html += '<div id="ds-rf-error" style="font-size:10px;color:var(--SmartThemeEmColor);min-height:14px;margin-bottom:4px;"></div>';
   html += '<div style="display:flex;gap:4px;">';
   html += '<button id="ds-rf-save" class="ds-btn ds-btn-sm ds-btn-primary" style="flex:1;font-size:11px;">保存</button>';
   html += '<button id="ds-rf-cancel" class="ds-btn ds-btn-sm ds-btn-normal" style="flex:1;font-size:11px;">取消</button>';
@@ -2213,10 +2331,10 @@ function showAddChannelInlineForm(doc) {
 
   var form = doc.createElement('div');
   form.id = 'ds-add-ch-form';
-  form.style.cssText = 'background:rgba(255,255,255,0.03);border:1px solid var(--SmartThemeBorderColor,#374151);border-radius:6px;padding:8px;margin-bottom:8px;';
+  form.style.cssText = 'background:var(--SmartThemeBlurTintColor);border:1px solid var(--SmartThemeBorderColor);border-radius:6px;padding:8px;margin-bottom:8px;';
   form.innerHTML =
     '<div style="font-size:10px;font-weight:600;color:var(--SmartThemeBodyColor);margin-bottom:6px;">新增渠道</div>' +
-    '<div style="margin-bottom:4px;"><div style="font-size:9px;color:var(--SmartThemeEmColor);margin-bottom:2px;">渠道名称 <span style="color:#f87171">*</span></div>' +
+    '<div style="margin-bottom:4px;"><div style="font-size:9px;color:var(--SmartThemeEmColor);margin-bottom:2px;">渠道名称 <span style="color:var(--SmartThemeEmColor)">*</span></div>' +
     '<input type="text" id="ds-nch-name" class="ds-input" placeholder="如: 硅基流动" style="height:24px;padding:3px 6px;font-size:11px;width:100%;box-sizing:border-box;"></div>' +
     '<div style="margin-bottom:6px;"><div style="font-size:9px;color:var(--SmartThemeEmColor);margin-bottom:2px;">标识颜色</div>' +
     '<input type="color" id="ds-nch-color" value="#10b981" style="width:28px;height:24px;padding:1px;border:none;background:transparent;cursor:pointer;"></div>' +
@@ -2233,12 +2351,12 @@ function showAddChannelInlineForm(doc) {
 
     '<div id="ds-nch-preset-rules-group" style="margin-bottom:8px;">' +
     '<div style="font-size:9px;color:var(--SmartThemeEmColor);margin-bottom:3px;">或导入预置定价规则</div>' +
-    '<div style="background:rgba(255,255,255,0.02);border:1px solid var(--SmartThemeBorderColor,#374151);border-radius:4px;padding:6px;display:flex;flex-direction:column;gap:4px;">' +
+    '<div style="background:var(--SmartThemeBlurTintColor);border:1px solid var(--SmartThemeBorderColor);border-radius:4px;padding:6px;display:flex;flex-direction:column;gap:4px;">' +
     rulesHtml +
     '</div>' +
     '</div>' +
 
-    '<div id="ds-nch-error" style="font-size:10px;color:#f87171;min-height:14px;margin-bottom:4px;"></div>' +
+    '<div id="ds-nch-error" style="font-size:10px;color:var(--SmartThemeEmColor);min-height:14px;margin-bottom:4px;"></div>' +
     '<div style="display:flex;gap:4px;">' +
     '<button id="ds-nch-create" class="ds-btn ds-btn-sm ds-btn-primary" style="flex:1;font-size:11px;">创建</button>' +
     '<button id="ds-nch-cancel" class="ds-btn ds-btn-sm ds-btn-normal" style="flex:1;font-size:11px;">取消</button>' +
@@ -2868,7 +2986,7 @@ function renderBalanceModule(doc, displaySave) {
     var color = ch.color || '#6366f1';
     var canQuery = (ch.balanceQueryType === 'deepseek' || ch.balanceQueryType === 'openai') && ch.apiKey;
 
-    html += '<div style="border-left:3px solid ' + escapeHTML(color) + ';padding:7px 10px;background:rgba(255,255,255,0.03);border-radius:0 6px 6px 0;">';
+    html += '<div style="border-left:3px solid ' + escapeHTML(color) + ';padding:7px 10px;background:var(--SmartThemeBlurTintColor);border-radius:0 6px 6px 0;">';
     html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:3px;">';
     html += '<span style="font-size:10px;font-weight:600;color:' + escapeHTML(color) + '">' + escapeHTML(ch.name) + '</span>';
     if (canQuery) {
@@ -3038,6 +3156,37 @@ function _doRefreshUI() {
   if (el('ds-stat-min-turn-tokens'))     el('ds-stat-min-turn-tokens').textContent     = formatTokens(minTurnTok);
   if (el('ds-stat-min-turn-tokens-sub')) el('ds-stat-min-turn-tokens-sub').textContent = '输 ' + formatTokens(minTTIn) + ' · 出 ' + formatTokens(minTTOut);
 
+  // Performance averages
+  var totalDur = 0, totalTTFT = 0, totalSpeed = 0, totalReasoningTk = 0, totalReasoningDur = 0;
+  var perfCount = 0, reasoningCount = 0;
+  if (s.history && s.history.length > 0) {
+    s.history.forEach(function(item) {
+      if (item.duration) {
+        totalDur += item.duration || 0;
+        totalTTFT += item.ttft || 0;
+        totalSpeed += item.speed || 0;
+        perfCount++;
+      }
+      if (item.reasoning_tokens || item.reasoning_duration) {
+        totalReasoningTk += item.reasoning_tokens || 0;
+        totalReasoningDur += item.reasoning_duration || 0;
+        reasoningCount++;
+      }
+    });
+  }
+  var avgDur = perfCount > 0 ? (totalDur / perfCount) : 0;
+  var avgTTFT = perfCount > 0 ? (totalTTFT / perfCount) : 0;
+  var avgSpeed = perfCount > 0 ? (totalSpeed / perfCount) : 0;
+  var avgReasoningTk = reasoningCount > 0 ? Math.round(totalReasoningTk / reasoningCount) : 0;
+  var avgReasoningDur = reasoningCount > 0 ? (totalReasoningDur / reasoningCount) : 0;
+
+  if (el('ds-stat-avg-duration'))     el('ds-stat-avg-duration').textContent     = avgDur.toFixed(1) + 's';
+  if (el('ds-stat-avg-duration-sub')) el('ds-stat-avg-duration-sub').textContent = '平均首延 ' + avgTTFT.toFixed(1) + 's';
+  if (el('ds-stat-avg-speed'))        el('ds-stat-avg-speed').textContent        = Math.round(avgSpeed) + ' t/s';
+  if (el('ds-stat-avg-speed-sub'))    el('ds-stat-avg-speed-sub').textContent    = perfCount > 0 ? ('基于 ' + perfCount + ' 轮数据') : '暂无数据';
+  if (el('ds-stat-reasoning-stats'))    el('ds-stat-reasoning-stats').textContent    = avgReasoningTk + ' tk/轮';
+  if (el('ds-stat-reasoning-stats-sub'))el('ds-stat-reasoning-stats-sub').textContent= '平均耗时 ' + avgReasoningDur.toFixed(1) + 's';
+
   // ── Latest entry ────────────────────────────────────────────────────────────
   var latestEl = el('ds-latest');
   if (s.history && s.history.length > 0 && latestEl) {
@@ -3064,12 +3213,22 @@ function _doRefreshUI() {
 
     if (s.history.length > 4) {
       var toggleText = isExpanded ? '收起历史记录' : '展开更多 (最多显示20条)...';
-      itemsHTML += '<div id="ds-history-toggle" style="text-align:center;padding:8px;cursor:pointer;color:var(--SmartThemeUnderlineColor,#818cf8);font-size:12px;font-weight:500;text-decoration:underline;">' + toggleText + '</div>';
+      itemsHTML += '<div id="ds-history-toggle" style="text-align:center;padding:8px;cursor:pointer;color:var(--SmartThemeUnderlineColor);font-size:12px;font-weight:500;text-decoration:underline;">' + toggleText + '</div>';
     }
     histEl.innerHTML = itemsHTML;
   } else if (histEl) {
     histEl.innerHTML = '<div class="ds-wait-text">暂无历史记录</div>';
   }
+
+  // Bind details buttons
+  doc.querySelectorAll('.ds-details-btn').forEach(function (btn) {
+    btn.onclick = function (e) {
+      e.stopPropagation();
+      var ts = parseInt(btn.getAttribute('data-timestamp'), 10);
+      var item = (s.history || []).find(function (h) { return h.timestamp === ts; });
+      if (item) showUsageDetailsModal(item);
+    };
+  });
 
   // ── Diff ────────────────────────────────────────────────────────────────────
   var diffEl = el('ds-diff');
@@ -3125,7 +3284,7 @@ function getPricingBadge(u) {
     return '<span style="font-size:9px;padding:1px 5px;border-radius:3px;color:var(--SmartThemeQuoteColor);border:1px solid var(--SmartThemeQuoteColor);font-weight:600;margin-left:4px;">平时</span>';
   }
   if (type === 'unknown') {
-    return '<span style="font-size:9px;padding:1px 5px;border-radius:3px;color:#f97316;border:1px solid #f97316;font-weight:600;margin-left:4px;">外部渠道</span>';
+    return '<span style="font-size:9px;padding:1px 5px;border-radius:3px;color:var(--SmartThemeQuoteColor);border:1px solid var(--SmartThemeQuoteColor);font-weight:600;margin-left:4px;">外部渠道</span>';
   }
   return '';
 }
@@ -3139,16 +3298,27 @@ function getChannelBadge(u) {
 
 function _buildEntryBodyHTML(u, hitRate, diffBtns) {
   var isUnknown = u.pricingType === 'unknown';
-  var costText  = isUnknown ? '<span style="color:#f97316;font-size:11px;">¥-- (无定价)</span>' : '<span style="font-size:13px;color:var(--SmartThemeBodyColor);font-weight:600;">¥' + (u.cost ? u.cost.toFixed(4) : '0.0000') + '</span>';
+  var costText  = isUnknown ? '<span style="color:var(--SmartThemeQuoteColor);font-size:11px;white-space:nowrap;">¥-- (无定价)</span>' : '<span style="font-size:13px;color:var(--SmartThemeBodyColor);font-weight:600;white-space:nowrap;">¥' + (u.cost ? u.cost.toFixed(4) : '0.0000') + '</span>';
   var hasSnapshot = u.messages && u.messages.length > 0;
-  return '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">' +
-      '<div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap;">' +
+
+  var perfHTML = '';
+  if (u.duration || u.ttft || u.speed || u.reasoning_tokens || u.reasoning_duration) {
+    perfHTML = '<div class="ds-perf-bar">' +
+      '<span title="总耗时"><i class="fa-solid fa-clock" style="color:var(--SmartThemeUnderlineColor);"></i>' + (u.duration ? u.duration.toFixed(1) : '0.0') + 's</span>' +
+      '<span title="首字延迟"><i class="fa-solid fa-hourglass-start" style="color:var(--SmartThemeQuoteColor);"></i>' + (u.ttft ? u.ttft.toFixed(1) : '0.0') + 's</span>' +
+      '<span title="生成速率"><i class="fa-solid fa-gauge-high" style="color:var(--SmartThemeQuoteColor);"></i>' + Math.round(u.speed || 0) + ' t/s</span>' +
+      ((u.reasoning_tokens || u.reasoning_duration) ? '<span title="思维链" style="color:var(--SmartThemeUnderlineColor);"><i class="fa-solid fa-brain"></i>' + (u.reasoning_duration ? u.reasoning_duration.toFixed(1) + 's' : '') + (u.reasoning_tokens ? ' (' + u.reasoning_tokens + 'tk)' : '') + '</span>' : '') +
+    '</div>';
+  }
+
+  return '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;gap:6px;">' +
+      '<div style="display:flex;align-items:center;gap:4px;min-width:0;overflow:hidden;">' +
         diffBtns.title +
-        '<span style="font-size:10px;padding:2px 7px;border-radius:4px;background:var(--SmartThemeBorderColor);color:var(--SmartThemeBodyColor);font-weight:500">' + escapeHTML(u.model) + '</span>' +
+        '<span class="ds-model-badge" style="font-size:10px;padding:2px 6px;border-radius:4px;background:var(--SmartThemeBorderColor);color:var(--SmartThemeBodyColor);font-weight:500;max-width:110px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:inline-block;flex-shrink:1;cursor:pointer;" title="' + escapeHTML(u.model) + '" onclick="this.style.maxWidth=this.style.maxWidth===\'none\'?\'110px\':\'none\';this.style.whiteSpace=this.style.whiteSpace===\'normal\'?\'nowrap\':\'normal\';">' + escapeHTML(u.model) + '</span>' +
         getPricingBadge(u) +
         getChannelBadge(u) +
       '</div>' +
-      costText +
+      '<div style="flex-shrink:0;">' + costText + '</div>' +
     '</div>' +
     '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">' +
       buildTokenCell('tokens', 'var(--SmartThemeEmColor)',          '16px', u.total_tokens)      +
@@ -3156,17 +3326,155 @@ function _buildEntryBodyHTML(u, hitRate, diffBtns) {
       buildTokenCell('输出',   'var(--SmartThemeQuoteColor)',       '13px', u.completion_tokens) +
     '</div>' +
     buildHitBar(hitRate) +
-    '<div style="display:flex;justify-content:space-between;align-items:center">' +
-      '<span style="font-size:10px;color:var(--SmartThemeQuoteColor);font-weight:500">' + parseFloat(hitRate).toFixed(1) + '% 命中</span>' +
+    '<div style="display:flex;justify-content:space-between;align-items:center;gap:6px;">' +
+      '<span style="font-size:10px;color:var(--SmartThemeQuoteColor);font-weight:500;white-space:nowrap;flex-shrink:0;">' + parseFloat(hitRate).toFixed(1) + '% 命中</span>' +
       (isUnknown
-        ? '<span style="font-size:10px;color:#f97316;">外部渠道 · 不计费用</span>'
-        : '<span style="font-size:10px;color:var(--SmartThemeEmColor)">¥' + (u.input_cost ? u.input_cost.toFixed(4) : '0.0000') + ' 输入 · ¥' + (u.output_cost ? u.output_cost.toFixed(4) : '0.0000') + ' 输出</span>') +
+        ? '<span style="font-size:10px;color:var(--SmartThemeQuoteColor);white-space:nowrap;flex-shrink:0;">外部渠道 · 不计费用</span>'
+        : '<span style="font-size:10px;color:var(--SmartThemeEmColor);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="¥' + (u.input_cost ? u.input_cost.toFixed(4) : '0.0000') + ' 输入 · ¥' + (u.output_cost ? u.output_cost.toFixed(4) : '0.0000') + ' 输出">¥' + (u.input_cost ? u.input_cost.toFixed(4) : '0.0000') + ' 输 · ¥' + (u.output_cost ? u.output_cost.toFixed(4) : '0.0000') + ' 出</span>') +
     '</div>' +
-    (hasSnapshot ?
-      '<div style="display:flex;gap:6px;margin-top:8px;justify-content:flex-end;">' +
+    perfHTML +
+    '<div style="display:flex;gap:6px;margin-top:8px;justify-content:flex-end;align-items:center;">' +
+      '<button class="ds-diff-btn ds-details-btn" data-timestamp="' + u.timestamp + '" style="background:var(--SmartThemeBlurTintColor);color:var(--SmartThemeUnderlineColor);border:1px solid var(--SmartThemeBorderColor);"><i class="fa-solid fa-circle-info" style="margin-right:3px;"></i>详情</button>' +
+      (hasSnapshot ?
         '<button class="ds-diff-btn ds-diff-before-btn' + (u.timestamp === selectedBeforeId ? ' active' : '') + '" data-timestamp="' + u.timestamp + '">旧</button>' +
-        '<button class="ds-diff-btn ds-diff-after-btn'  + (u.timestamp === selectedAfterId  ? ' active' : '') + '" data-timestamp="' + u.timestamp + '">新</button>' +
-      '</div>' : '');
+        '<button class="ds-diff-btn ds-diff-after-btn'  + (u.timestamp === selectedAfterId  ? ' active' : '') + '" data-timestamp="' + u.timestamp + '">新</button>' : '') +
+    '</div>';
+}
+
+function showUsageDetailsModal(u) {
+  var doc = getDoc();
+  var panel = doc.getElementById('ds-panel');
+  var container = panel || doc.body;
+
+  var existing = doc.getElementById('ds-usage-modal-overlay');
+  if (existing) existing.remove();
+
+  var overlay = doc.createElement('div');
+  overlay.id = 'ds-usage-modal-overlay';
+  overlay.className = 'ds-usage-modal-overlay';
+  overlay.onclick = function (e) { if (e.target === overlay) overlay.remove(); };
+
+  var modal = doc.createElement('div');
+  modal.className = 'ds-usage-modal';
+
+  var header = doc.createElement('div');
+  header.className = 'ds-usage-modal-header';
+  header.innerHTML = '<div class="ds-usage-modal-title"><i class="fa-solid fa-circle-info" style="color:var(--SmartThemeUnderlineColor);margin-right:6px;"></i>使用详情 — ' + escapeHTML(u.model || 'deepseek') + '</div>' +
+    '<div class="ds-close-btn" id="ds-usage-modal-close">✕</div>';
+
+  var body = doc.createElement('div');
+  body.className = 'ds-usage-modal-body';
+
+  var reqBodyObj = u.request_body || (u.messages ? { messages: u.messages } : null);
+  var fullResObj = u.full_response || { id: 'resp-' + u.timestamp, model: u.model, usage: { prompt_tokens: u.prompt_tokens, completion_tokens: u.completion_tokens, total_tokens: u.total_tokens } };
+
+  var html = '<div class="ds-usage-grid">';
+
+  // 1. 模型
+  html += '<div class="ds-usage-card">' +
+    '<div class="ds-usage-card-label"><i class="fa-solid fa-cube" style="margin-right:4px;"></i>模型</div>' +
+    '<div class="ds-usage-card-val" style="color:var(--SmartThemeUnderlineColor);font-size:12px;word-break:break-all;">' + escapeHTML(u.model) + '</div>' +
+  '</div>';
+
+  // 2. 时间
+  var timeStr = new Date(u.timestamp).toLocaleString('zh-CN');
+  html += '<div class="ds-usage-card">' +
+    '<div class="ds-usage-card-label"><i class="fa-solid fa-calendar-days" style="margin-right:4px;"></i>时间</div>' +
+    '<div class="ds-usage-card-val" style="font-size:11px;">' + timeStr + '</div>' +
+  '</div>';
+
+  // 3. 耗时
+  html += '<div class="ds-usage-card">' +
+    '<div class="ds-usage-card-label"><i class="fa-solid fa-clock" style="margin-right:4px;color:var(--SmartThemeUnderlineColor);"></i>耗时</div>' +
+    '<div class="ds-usage-card-val" style="color:var(--SmartThemeUnderlineColor);">' + (u.duration ? u.duration.toFixed(1) : '0.0') + 's</div>' +
+  '</div>';
+
+  // 4. 首字延迟
+  html += '<div class="ds-usage-card">' +
+    '<div class="ds-usage-card-label"><i class="fa-solid fa-hourglass-start" style="margin-right:4px;color:var(--SmartThemeQuoteColor);"></i>首字延迟</div>' +
+    '<div class="ds-usage-card-val" style="color:var(--SmartThemeQuoteColor);">' + (u.ttft ? u.ttft.toFixed(1) : '0.0') + 's</div>' +
+  '</div>';
+
+  // 5. 思维链耗时
+  html += '<div class="ds-usage-card">' +
+    '<div class="ds-usage-card-label"><i class="fa-solid fa-brain" style="margin-right:4px;color:var(--SmartThemeUnderlineColor);"></i>思维链耗时</div>' +
+    '<div class="ds-usage-card-val" style="color:var(--SmartThemeUnderlineColor);">' + (u.reasoning_duration ? u.reasoning_duration.toFixed(1) : '0.0') + 's</div>' +
+  '</div>';
+
+  // 6. 思维链 Token
+  html += '<div class="ds-usage-card">' +
+    '<div class="ds-usage-card-label"><i class="fa-solid fa-brain" style="margin-right:4px;color:var(--SmartThemeUnderlineColor);"></i>思维链 Token</div>' +
+    '<div class="ds-usage-card-val" style="color:var(--SmartThemeUnderlineColor);">' + (u.reasoning_tokens || 0) + '</div>' +
+  '</div>';
+
+  // 7. 速率
+  html += '<div class="ds-usage-card">' +
+    '<div class="ds-usage-card-label"><i class="fa-solid fa-gauge-high" style="margin-right:4px;color:var(--SmartThemeQuoteColor);"></i>速率</div>' +
+    '<div class="ds-usage-card-val" style="color:var(--SmartThemeQuoteColor);">' + Math.round(u.speed || 0) + ' t/s</div>' +
+  '</div>';
+
+  // 8. 时段
+  html += '<div class="ds-usage-card">' +
+    '<div class="ds-usage-card-label"><i class="fa-solid fa-layer-group" style="margin-right:4px;"></i>时段</div>' +
+    '<div class="ds-usage-card-val">' + (getPricingBadge(u) || '<span style="font-size:11px;">普通</span>') + '</div>' +
+  '</div>';
+
+  // 9. 缓存命中
+  html += '<div class="ds-usage-card">' +
+    '<div class="ds-usage-card-label"><i class="fa-solid fa-circle-check" style="margin-right:4px;color:var(--SmartThemeQuoteColor);"></i>缓存命中</div>' +
+    '<div class="ds-usage-card-val" style="color:var(--SmartThemeQuoteColor);">' + (u.cache_hit_tokens || 0).toLocaleString() + '</div>' +
+  '</div>';
+
+  // 10. 缓存未命中
+  html += '<div class="ds-usage-card">' +
+    '<div class="ds-usage-card-label"><i class="fa-solid fa-circle-xmark" style="margin-right:4px;color:var(--SmartThemeEmColor);"></i>缓存未命中</div>' +
+    '<div class="ds-usage-card-val" style="color:var(--SmartThemeEmColor);">' + (u.cache_miss_tokens || 0).toLocaleString() + '</div>' +
+  '</div>';
+
+  // 11. 输出 Token
+  html += '<div class="ds-usage-card">' +
+    '<div class="ds-usage-card-label"><i class="fa-solid fa-arrow-right-from-bracket" style="margin-right:4px;color:var(--SmartThemeUnderlineColor);"></i>输出 Token</div>' +
+    '<div class="ds-usage-card-val" style="color:var(--SmartThemeUnderlineColor);">' + (u.completion_tokens || 0).toLocaleString() + '</div>' +
+  '</div>';
+
+  // 12. 总 Token
+  html += '<div class="ds-usage-card">' +
+    '<div class="ds-usage-card-label"><i class="fa-solid fa-calculator" style="margin-right:4px;"></i>总 Token</div>' +
+    '<div class="ds-usage-card-val">' + (u.total_tokens || 0).toLocaleString() + '</div>' +
+  '</div>';
+
+  // 13. 输入费用
+  html += '<div class="ds-usage-card">' +
+    '<div class="ds-usage-card-label"><i class="fa-solid fa-coins" style="margin-right:4px;color:var(--SmartThemeQuoteColor);"></i>输入费用</div>' +
+    '<div class="ds-usage-card-val" style="color:var(--SmartThemeQuoteColor);">¥' + (u.input_cost ? u.input_cost.toFixed(6) : '0.000000') + '</div>' +
+  '</div>';
+
+  // 14. 输出费用
+  html += '<div class="ds-usage-card">' +
+    '<div class="ds-usage-card-label"><i class="fa-solid fa-coins" style="margin-right:4px;color:var(--SmartThemeQuoteColor);"></i>输出费用</div>' +
+    '<div class="ds-usage-card-val" style="color:var(--SmartThemeQuoteColor);">¥' + (u.output_cost ? u.output_cost.toFixed(6) : '0.000000') + '</div>' +
+  '</div>';
+
+  // 15. 总费用 (Full Width)
+  html += '<div class="ds-usage-card" style="grid-column: 1 / -1;background:var(--SmartThemeBlurTintColor);border:1px solid var(--SmartThemeBorderColor);">' +
+    '<div class="ds-usage-card-label"><i class="fa-solid fa-wallet" style="margin-right:4px;color:var(--SmartThemeQuoteColor);"></i>总费用</div>' +
+    '<div class="ds-usage-card-val" style="color:var(--SmartThemeQuoteColor);font-size:18px;">¥' + (u.cost ? u.cost.toFixed(6) : '0.000000') + '</div>' +
+  '</div>';
+
+  html += '</div>'; // ds-usage-grid
+
+  // Collapsible Code Blocks
+  html += '<details class="ds-dropdown-section" style="margin-top:12px;"><summary><i class="fa-solid fa-code" style="margin-right:6px;"></i>请求参数 (Request Body)</summary><div class="ds-dropdown-section-content"><pre class="ds-code-block">' + escapeHTML(JSON.stringify(reqBodyObj, null, 2)) + '</pre></div></details>';
+
+  html += '<details class="ds-dropdown-section" style="margin-top:8px;"><summary><i class="fa-solid fa-terminal" style="margin-right:6px;"></i>API 完整响应 (Full Response)</summary><div class="ds-dropdown-section-content"><pre class="ds-code-block">' + escapeHTML(typeof fullResObj === 'string' ? fullResObj : JSON.stringify(fullResObj, null, 2)) + '</pre></div></details>';
+
+  body.innerHTML = html;
+  modal.appendChild(header);
+  modal.appendChild(body);
+  overlay.appendChild(modal);
+  container.appendChild(overlay);
+
+  doc.getElementById('ds-usage-modal-close').onclick = function () { overlay.remove(); };
 }
 
 function buildEntryHTML(u, hitRate) {
@@ -3192,7 +3500,7 @@ function buildTokenCell(label, color, fontSize, value) {
 
 function buildHitBar(pct) {
   var width = Math.min(100, Math.max(0, parseFloat(pct) || 0));
-  return '<div style="background:rgba(0,0,0,0.15);border-radius:4px;height:4px;overflow:hidden;margin-bottom:4px">' +
+  return '<div style="background:var(--SmartThemeBorderColor);border-radius:4px;height:4px;overflow:hidden;margin-bottom:4px">' +
     '<div style="background:linear-gradient(90deg,var(--SmartThemeQuoteColor),var(--SmartThemeUnderlineColor));width:' + width + '%;height:100%;border-radius:4px;transition:width 0.3s"></div>' +
   '</div>';
 }
