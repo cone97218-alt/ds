@@ -88,6 +88,7 @@ var DEFAULT_SETTINGS = {
   },
   channels: [],          // populated by initDefaultChannels()
   balanceLayout: 'vertical', // 'vertical' | 'horizontal'
+  maxHistoryItems: 5000,     // default history retention rounds limit per save (0 = unlimited)
   pcWindow: {
     floating: { left: null, top: null, width: 880, height: 720 },
     dockLeft: { width: 460 },
@@ -746,6 +747,11 @@ function initDefaultChannels() {
 }
 
 // ─── Persistence ──────────────────────────────────────────────────────────────
+function getMaxHistoryLimit() {
+  if (!state.settings || state.settings.maxHistoryItems === undefined || state.settings.maxHistoryItems === null) return 5000;
+  return parseInt(state.settings.maxHistoryItems, 10);
+}
+
 function saveSaves() {
   _mergedStatsCache = null; _mergedStatsCacheKey = '';
   if (_saveSavesTimer) clearTimeout(_saveSavesTimer);
@@ -828,7 +834,8 @@ function getMergedStats() {
   });
   m.startTime = es;
   ah.sort(function (a, b) { return b.timestamp - a.timestamp; });
-  m.history = ah.slice(0, 1000);
+  var maxItems = getMaxHistoryLimit();
+  m.history = (maxItems > 0 && ah.length > maxItems) ? ah.slice(0, maxItems) : ah;
   _mergedStatsCache = m; _mergedStatsCacheKey = cacheKey;
   return m;
 }
@@ -1253,7 +1260,8 @@ async function processUsage(usage, model, isDebug, messages, requestId, apiKey, 
     if (s.history[i].request_body) delete s.history[i].request_body;
     if (s.history[i].full_response) delete s.history[i].full_response;
   }
-  if (s.history.length > 1000) s.history = s.history.slice(0, 1000);
+  var maxItems = getMaxHistoryLimit();
+  if (maxItems > 0 && s.history.length > maxItems) s.history = s.history.slice(0, maxItems);
 
   saveSaves();
 
@@ -2072,6 +2080,19 @@ function createUI() {
       '<summary>统计卡片定制</summary>' +
       '<div class="ds-dropdown-section-content"><div id="ds-stats-custom-list" style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:6px;"></div></div>' +
     '</details>' +
+    '<details class="ds-dropdown-section">' +
+      '<summary>历史数据存储上限</summary>' +
+      '<div class="ds-dropdown-section-content">' +
+        '<div style="font-size:11px;color:var(--SmartThemeEmColor);margin-bottom:6px;">单存档保留历史轮数：</div>' +
+        '<select id="ds-max-history-select" class="ds-input-compact" style="width:100%;height:26px;font-size:11px;background:var(--SmartThemeBlurTintColor);color:var(--SmartThemeBodyColor);border:1px solid var(--SmartThemeBorderColor);border-radius:4px;">' +
+          '<option value="1000">1,000 轮 (轻量)</option>' +
+          '<option value="3000">3,000 轮</option>' +
+          '<option value="5000">5,000 轮 (默认/推荐)</option>' +
+          '<option value="10000">10,000 轮 (海量明细)</option>' +
+          '<option value="0">无限制 (全量永久保存)</option>' +
+        '</select>' +
+      '</div>' +
+    '</details>' +
     '<details class="ds-dropdown-section" id="ds-channel-manager-section">' +
       '<summary>渠道管理</summary>' +
       '<div class="ds-dropdown-section-content"><div id="ds-channel-manager"></div></div>' +
@@ -2275,6 +2296,16 @@ function bindUIControls(doc) {
     if (radio.value === state.settings.displayMode) radio.checked = true;
     radio.onchange = async function () { state.settings.displayMode = this.value; await saveSettings(); applyDisplayMode(); };
   });
+
+  // Max history items limit select
+  var maxHistSelect = doc.getElementById('ds-max-history-select');
+  if (maxHistSelect) {
+    maxHistSelect.value = String(state.settings.maxHistoryItems !== undefined ? state.settings.maxHistoryItems : 5000);
+    maxHistSelect.onchange = async function () {
+      state.settings.maxHistoryItems = parseInt(this.value, 10);
+      await saveSettings();
+    };
+  }
 
   // Panel diff/history delegation
   var panel = doc.getElementById('ds-panel');
