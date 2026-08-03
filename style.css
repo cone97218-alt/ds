@@ -39,7 +39,7 @@
 
 /* 1. Standard Centered Modal (Default on desktop, Fullscreen on mobile) */
 @media(min-width: 761px) {
-    #ds-panel:not(.ds-fullscreen):not(.ds-qr-top):not(.ds-qr-bottom):not(.ds-qr-left):not(.ds-qr-right) {
+    #ds-panel:not(.ds-fullscreen):not(.ds-qr-top):not(.ds-qr-bottom):not(.ds-qr-left):not(.ds-qr-right):not(.ds-pc-floating):not(.ds-pc-dock-left):not(.ds-pc-dock-right) {
         position: fixed !important;
         top: 50% !important;
         left: 50% !important;
@@ -53,7 +53,7 @@
         border: 1px solid var(--SmartThemeBorderColor) !important;
         box-shadow: 0 10px 30px var(--SmartThemeShadowColor) !important;
     }
-    #ds-panel:not(.ds-fullscreen):not(.ds-qr-top):not(.ds-qr-bottom):not(.ds-qr-left):not(.ds-qr-right).ds-open {
+    #ds-panel:not(.ds-fullscreen):not(.ds-qr-top):not(.ds-qr-bottom):not(.ds-qr-left):not(.ds-qr-right):not(.ds-pc-floating):not(.ds-pc-dock-left):not(.ds-pc-dock-right).ds-open {
         transform: translate(-50%, -50%) scale(1) !important;
         opacity: 1 !important;
         pointer-events: auto !important;
@@ -61,7 +61,7 @@
 }
 
 @media(max-width: 760px) {
-    #ds-panel:not(.ds-qr-top):not(.ds-qr-bottom):not(.ds-qr-left):not(.ds-qr-right) {
+    #ds-panel:not(.ds-qr-top):not(.ds-qr-bottom):not(.ds-qr-left):not(.ds-qr-right):not(.ds-pc-floating):not(.ds-pc-dock-left):not(.ds-pc-dock-right) {
         display: flex !important;
         width: 100vw !important;
         height: 100vh !important;
@@ -73,7 +73,7 @@
         opacity: 0 !important;
         pointer-events: none !important;
     }
-    #ds-panel:not(.ds-qr-top):not(.ds-qr-bottom):not(.ds-qr-left):not(.ds-qr-right).ds-open {
+    #ds-panel:not(.ds-qr-top):not(.ds-qr-bottom):not(.ds-qr-left):not(.ds-qr-right):not(.ds-pc-floating):not(.ds-pc-dock-left):not(.ds-pc-dock-right).ds-open {
         display: flex !important;
         transform: translateY(0) !important;
         opacity: 1 !important;
