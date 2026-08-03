@@ -1,6 +1,6 @@
-import { eventSource, event_types } from '../../../../script.js';
-import { getContext } from '../../../extensions.js';
-
+var eventSource = null;
+var event_types = null;
+var getContext = null;
 var local_secret_state = null;
 var local_SECRET_KEYS = null;
 
@@ -1706,6 +1706,8 @@ function applyDisplayMode() {
         panel.style.height = '100vh';
         panel.style.transform = 'none';
       }
+    }
+
     var ov = doc.getElementById('ds-overlay');
     if (ov) {
       if (mode.startsWith('pc-') && isPC) ov.classList.add('ds-pc-mode');
@@ -1758,23 +1760,47 @@ function initWalletButtonObserver() {
 }
 
 // ─── Events + Fetch ───────────────────────────────────────────────────────────
-function setupEvents() {
+async function setupEvents() {
   logDebug('初始化事件监听中...');
-  import('/scripts/secrets.js').then(function (m) {
+  try {
+    var p = window.parent || window;
+    if (p.SillyTavern && p.SillyTavern.getContext) {
+      var ctx = p.SillyTavern.getContext();
+      eventSource = ctx.eventSource;
+      event_types = ctx.event_types;
+      getContext = p.SillyTavern.getContext;
+    } else {
+      var scriptModule = await import('/scripts/script.js');
+      eventSource = scriptModule.eventSource;
+      event_types = scriptModule.event_types;
+    }
+  } catch (e) {
+    logDebug('获取 eventSource 监听失败: ' + e.message);
+  }
+
+  try {
+    var m = await import('/scripts/secrets.js');
     local_secret_state = m.secret_state;
     local_SECRET_KEYS = m.SECRET_KEYS;
     logDebug('secrets.js 动态导入成功');
-  }).catch(function (e) {
+  } catch (e) {
     logDebug('secrets.js 动态导入失败: ' + e.message);
-  });
-  eventSource.on(event_types.MESSAGE_RECEIVED, function () {
-    logDebug('收到消息接收事件 (MESSAGE_RECEIVED)');
-    setTimeout(refreshUI, 500);
-  });
-  eventSource.on(event_types.CHAT_CHANGED, function () {
-    logDebug('收到对话切换事件 (CHAT_CHANGED)');
-    setTimeout(handleChatChanged, 500);
-  });
+  }
+
+  if (eventSource && event_types) {
+    if (event_types.MESSAGE_RECEIVED) {
+      eventSource.on(event_types.MESSAGE_RECEIVED, function () {
+        logDebug('收到消息接收事件 (MESSAGE_RECEIVED)');
+        setTimeout(refreshUI, 500);
+      });
+    }
+    if (event_types.CHAT_CHANGED) {
+      eventSource.on(event_types.CHAT_CHANGED, function () {
+        logDebug('收到对话切换事件 (CHAT_CHANGED)');
+        setTimeout(handleChatChanged, 500);
+      });
+    }
+  }
 }
 
 function patchFetch() {
@@ -3769,7 +3795,7 @@ function buildHitBar(pct) {
 }
 
 // ─── Extension Entry-Point ────────────────────────────────────────────────────
-export async function init() {
+async function init() {
   logDebug('SillyTavern DeepSeek Extension 初始化中...');
   await migrateLocalStorageToIndexedDB();
   await loadSavedData();
@@ -3777,7 +3803,7 @@ export async function init() {
   await loadCurrentSave();
   await handleChatChanged();
 
-  setupEvents();
+  await setupEvents();
   createUI();
   patchFetch();
   state.panelOpen = false;
@@ -3832,10 +3858,26 @@ export async function init() {
   } catch (e) {}
 }
 
+// Global hooks for SillyTavern Extension Loader
+try {
+  var pWin = window.parent || window;
+  pWin.init = init;
+  pWin.ds_init = init;
+} catch (e) {}
+
+if (typeof jQuery !== 'undefined') {
+  jQuery(function () {
+    init();
+  });
+} else {
+  setTimeout(init, 300);
+}
+
 // ─── Public API ───────────────────────────────────────────────────────────────
 window.DeepSeekStats = {
   state:        state,
   togglePanel:  togglePanel,
   refreshUI:    refreshUI,
   getChannels:  getChannels,
+  init:         init,
 };
