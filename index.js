@@ -119,8 +119,11 @@ var state = {
   // UI transient state (not persisted):
   activeModelFilter: '__all__',
   activeChannelFilter: '__all__',
+  isGenerating: false,
+  generatingState: null,
 };
 
+var _generatingTimer = null;
 var isInitDone    = false;
 var initTimestamp = 0;
 var selectedBeforeId = null;
@@ -1190,6 +1193,10 @@ async function processUsage(usage, model, isDebug, messages, requestId, apiKey, 
     lastProcessedSignature = signature; lastProcessedTime = now;
   }
 
+  if (_generatingTimer) { clearInterval(_generatingTimer); _generatingTimer = null; }
+  state.isGenerating = false;
+  state.generatingState = null;
+
   var lu = {
     timestamp: Date.now(), model: modelName,
     prompt_tokens: hit + miss,
@@ -1871,6 +1878,25 @@ function patchFetch() {
         return rawFetch.apply(p, args);
       }
 
+      // Mark generation started
+      var reqModel = (req && req.model) || 'DeepSeek';
+      state.isGenerating = true;
+      state.generatingState = {
+        startTime: startTime,
+        firstTokenTime: null,
+        reasoningStartTime: null,
+        reasoningEndTime: null,
+        chunkCount: 0,
+        model: reqModel
+      };
+
+      if (_generatingTimer) clearInterval(_generatingTimer);
+      _generatingTimer = setInterval(function () {
+        if (state.isGenerating) refreshUI();
+      }, 300);
+
+      refreshUI();
+
       logDebug('发送真实 Fetch 请求至服务器...');
       return rawFetch.apply(p, args).then(function (res) {
         fetchResponseTime = Date.now();
@@ -1896,8 +1922,12 @@ function patchFetch() {
                       var now = Date.now();
                       try {
                         var chunkStr = decoder.decode(chunk, { stream: true });
-                        if (chunkStr) {
-                          if (firstTokenTime === null) firstTokenTime = now;
+                        if (chunkStr && state.generatingState) {
+                          state.generatingState.chunkCount++;
+                          if (firstTokenTime === null) {
+                            firstTokenTime = now;
+                            state.generatingState.firstTokenTime = now;
+                          }
                           var isReasoning = chunkStr.indexOf('reasoning_content') !== -1 ||
                                             chunkStr.indexOf('"reasoning"') !== -1 ||
                                             chunkStr.indexOf('"thought"') !== -1 ||
@@ -1906,6 +1936,8 @@ function patchFetch() {
                           if (isReasoning) {
                             if (reasoningStartTime === null) reasoningStartTime = now;
                             reasoningEndTime = now;
+                            state.generatingState.reasoningStartTime = reasoningStartTime;
+                            state.generatingState.reasoningEndTime = reasoningEndTime;
                           }
                         }
                       } catch (err) {}
@@ -2007,6 +2039,12 @@ function patchFetch() {
           logDebug('读取克隆响应 text 失败: ' + e.message);
         });
         return outRes;
+      }).catch(function (err) {
+        if (_generatingTimer) { clearInterval(_generatingTimer); _generatingTimer = null; }
+        state.isGenerating = false;
+        state.generatingState = null;
+        refreshUI();
+        throw err;
       });
     }
     return rawFetch.apply(p, args);
@@ -3509,7 +3547,50 @@ function _doRefreshUI() {
 
   // ── Latest entry ────────────────────────────────────────────────────────────
   var latestEl = el('ds-latest');
-  if (s.history && s.history.length > 0 && latestEl) {
+  if (state.isGenerating && state.generatingState && latestEl) {
+    var gs = state.generatingState;
+    var now = Date.now();
+    var elapsedSec = Math.max(0.1, ((now - gs.startTime) / 1000)).toFixed(1);
+    var ttftText = gs.firstTokenTime ? ((gs.firstTokenTime - gs.startTime) / 1000).toFixed(1) + 's' : '等待首字...';
+
+    var statusStage = '等待响应...';
+    if (gs.reasoningStartTime && (!gs.firstTokenTime || (gs.reasoningEndTime && gs.reasoningEndTime >= gs.firstTokenTime))) {
+      statusStage = '思考中 🧠';
+    } else if (gs.firstTokenTime) {
+      statusStage = '吐字输出中 ✍️';
+    }
+
+    latestEl.innerHTML =
+      '<div style="padding:12px;border:1px dashed var(--SmartThemeUnderlineColor);background:var(--SmartThemeBlurTintColor);border-radius:10px;">' +
+        '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">' +
+          '<div style="display:flex;align-items:center;gap:8px;font-weight:700;font-size:13px;color:var(--SmartThemeUnderlineColor);">' +
+            '<i class="fa-solid fa-spinner fa-spin"></i>' +
+            '<span>正在生成响应中...</span>' +
+          '</div>' +
+          '<span style="background:var(--SmartThemeUnderlineColor);color:var(--SmartThemeBodyColor);font-size:11px;font-weight:600;padding:2px 8px;border-radius:10px;border:1px solid var(--SmartThemeBorderColor);">' +
+            escapeHTML(gs.model || 'DeepSeek') +
+          '</span>' +
+        '</div>' +
+        '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;padding:10px;background:var(--SmartThemeBlurTintColor);border-radius:8px;border:1px solid var(--SmartThemeBorderColor);margin-bottom:8px;">' +
+          '<div style="text-align:center;">' +
+            '<div style="font-size:10px;color:var(--SmartThemeEmColor);">已耗时</div>' +
+            '<div style="font-size:15px;font-weight:700;color:var(--SmartThemeBodyColor);">' + elapsedSec + 's</div>' +
+          '</div>' +
+          '<div style="text-align:center;">' +
+            '<div style="font-size:10px;color:var(--SmartThemeEmColor);">首字延迟</div>' +
+            '<div style="font-size:15px;font-weight:700;color:var(--SmartThemeQuoteColor);">' + ttftText + '</div>' +
+          '</div>' +
+          '<div style="text-align:center;">' +
+            '<div style="font-size:10px;color:var(--SmartThemeEmColor);">当前状态</div>' +
+            '<div style="font-size:12px;font-weight:700;color:var(--SmartThemeUnderlineColor);">' + statusStage + '</div>' +
+          '</div>' +
+        '</div>' +
+        '<div style="font-size:10px;color:var(--SmartThemeEmColor);display:flex;align-items:center;justify-content:space-between;">' +
+          '<span><i class="fa-solid fa-satellite-dish" style="margin-right:4px;"></i>流式传输中 (' + (gs.chunkCount || 0) + ' chunks)</span>' +
+          '<span>完成自动换算账单</span>' +
+        '</div>' +
+      '</div>';
+  } else if (s.history && s.history.length > 0 && latestEl) {
     var u  = s.history[0];
     var hr = u.prompt_tokens > 0 ? (u.cache_hit_tokens / u.prompt_tokens * 100).toFixed(1) : '0.0';
     latestEl.innerHTML = buildEntryHTML(u, hr);
