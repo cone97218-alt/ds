@@ -1255,7 +1255,7 @@ async function processUsage(usage, model, isDebug, messages, requestId, apiKey, 
     full_response:      extraMetrics ? extraMetrics.full_response : null,
   });
 
-  for (var i = 10; i < s.history.length; i++) {
+  for (var i = 20; i < s.history.length; i++) {
     if (s.history[i].messages) delete s.history[i].messages;
     if (s.history[i].request_body) delete s.history[i].request_body;
     if (s.history[i].full_response) delete s.history[i].full_response;
