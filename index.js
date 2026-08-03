@@ -1,6 +1,6 @@
-var eventSource = null;
-var event_types = null;
-var getContext = null;
+import { eventSource, event_types } from '/script.js';
+import { getContext } from '/scripts/extensions.js';
+
 var local_secret_state = null;
 var local_SECRET_KEYS = null;
 
@@ -1780,22 +1780,6 @@ function initWalletButtonObserver() {
 // ─── Events + Fetch ───────────────────────────────────────────────────────────
 async function setupEvents() {
   logDebug('初始化事件监听中...');
-  try {
-    var p = window.parent || window;
-    if (p.SillyTavern && p.SillyTavern.getContext) {
-      var ctx = p.SillyTavern.getContext();
-      eventSource = ctx.eventSource;
-      event_types = ctx.event_types;
-      getContext = p.SillyTavern.getContext;
-    } else {
-      var scriptModule = await import('/scripts/script.js');
-      eventSource = scriptModule.eventSource;
-      event_types = scriptModule.event_types;
-    }
-  } catch (e) {
-    logDebug('获取 eventSource 监听失败: ' + e.message);
-  }
-
   try {
     var m = await import('/scripts/secrets.js');
     local_secret_state = m.secret_state;
@@ -3951,7 +3935,7 @@ function buildHitBar(pct) {
 }
 
 // ─── Extension Entry-Point ────────────────────────────────────────────────────
-async function init() {
+export async function init() {
   logDebug('SillyTavern DeepSeek Extension 初始化中...');
   await migrateLocalStorageToIndexedDB();
   await loadSavedData();
