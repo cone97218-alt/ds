@@ -1737,15 +1737,22 @@ function applyDisplayMode() {
 
   var wandBtn = doc.getElementById('ds_wand_container');
   if (wandBtn) {
-    if (mode === 'wand-modal' || mode === 'wand-fullscreen' || mode.startsWith('pc-')) wandBtn.style.setProperty('display', 'flex', 'important');
+    if (mode === 'wand-modal' || mode === 'wand-fullscreen' || mode.startsWith('pc-') || !shouldInjectQr()) wandBtn.style.setProperty('display', 'flex', 'important');
     else wandBtn.style.setProperty('display', 'none', 'important');
   }
   ensureWalletButton();
 }
 
-function ensureWalletButton() {
+function shouldInjectQr() {
+  if (typeof state.settings.injectQr === 'boolean') {
+    return state.settings.injectQr;
+  }
   var mode = state.settings.displayMode || 'wand-modal';
-  if (mode.indexOf('qr-') !== 0) { removeWalletButton(); return; }
+  return mode.indexOf('qr-') === 0;
+}
+
+function ensureWalletButton() {
+  if (!shouldInjectQr()) { removeWalletButton(); return; }
   var doc = getDoc();
   var btnContainer = doc.querySelector('#qr--bar .qr--buttons') || doc.getElementById('qr--bar');
   if (!btnContainer) return;
@@ -1772,7 +1779,10 @@ function initWalletButtonObserver() {
     var MObs = win.MutationObserver || win.parent?.MutationObserver || window.MutationObserver;
     if (!MObs) return;
     if (walletBtnObserver) walletBtnObserver.disconnect();
-    walletBtnObserver = new MObs(function () { if ((state.settings.displayMode || '').indexOf('qr-') === 0) ensureWalletButton(); });
+    walletBtnObserver = new MObs(function () {
+      if (shouldInjectQr()) ensureWalletButton();
+      else removeWalletButton();
+    });
     walletBtnObserver.observe(doc.body, { childList: true, subtree: true });
   } catch (e) { console.warn('[DS] initWalletButtonObserver:', e); }
 }
@@ -2091,6 +2101,14 @@ function createUI() {
     '<details class="ds-dropdown-section">' +
       '<summary>界面入口及展示</summary>' +
       '<div class="ds-dropdown-section-content">' +
+        '<div class="ds-flex-between ds-margin-b-8" style="padding-bottom:8px; border-bottom:1px solid var(--SmartThemeBorderColor);">' +
+          '<div>' +
+            '<span class="ds-switch-label" style="font-size:12px; font-weight:600;">注入 QR 栏快捷按钮</span>' +
+            '<div style="font-size:10px; color:var(--SmartThemeEmColor); margin-top:2px;">开启后向快捷回复栏(QR)注入钱包图标；关闭则不注入，仅通过斜杠命令 <code>/ds</code> 或魔法棒召出</div>' +
+          '</div>' +
+          '<label class="ds-switch"><input type="checkbox" id="ds-inject-qr"><span class="ds-switch-slider"></span></label>' +
+        '</div>' +
+        '<div style="font-size:11px; color:var(--SmartThemeEmColor); margin-bottom:6px; font-weight:600;">面板展示模式：</div>' +
         ['wand-modal:魔法棒菜单 (普通弹窗)','wand-fullscreen:魔法棒菜单 (全屏)',
          'pc-floating:电脑端 悬浮窗 (可拖拽/缩放/记忆)','pc-dock-left:电脑端 左侧贴靠 (可调宽度/记忆)','pc-dock-right:电脑端 右侧贴靠 (可调宽度/记忆)',
          'qr-bar:QR 栏 (普通弹窗)','qr-top:QR 栏 (自上方滑出)','qr-bottom:QR 栏 (自下方滑出)','qr-left:QR 栏 (自左侧滑出)','qr-right:QR 栏 (自右侧滑出)']
@@ -2167,7 +2185,7 @@ function createUI() {
       '<div id="ds-help-modal-close" class="ds-close-btn">✕</div>' +
     '</div>' +
     '<div class="ds-help-modal-body">' +
-      '<div class="ds-help-modal-version">版本：release1.63</div>' +
+      '<div class="ds-help-modal-version">版本：release1.64</div>' +
       '<div class="ds-help-block"><div class="ds-help-label-red">⚠️ 安全提示</div><div>在本插件中填入 API 密钥存在安全风险，建议使用权限受限的密钥。</div></div>' +
       '<div class="ds-help-block"><div class="ds-help-label-blue">ℹ️ 渠道说明</div><div class="ds-help-modal-list">' +
         '<div>1. 在"渠道管理"中配置各渠道的 API 密钥、余额和定价规则</div>' +
@@ -2181,7 +2199,14 @@ function createUI() {
         '<div>2. <b>脱敏星号遮罩</b>：填入 SillyTavern 侧列表显示的遮罩值，如 <code>*******e7f</code></div>' +
         '<div>3. <b>明文密钥</b>：填入完整的明文 Key 字符串，如 <code>sk-123456...e7f</code>（系统会自动首尾比对）</div>' +
       '</div></div>' +
-      '<div class="ds-help-block"><div class="ds-help-label-purple">✨ 关于</div><div>本插件由 AI 编写、优化及修复，版本 release1.63</div></div>' +
+      '<div class="ds-help-block"><div class="ds-help-label-blue">⌨️ 斜杠命令</div><div class="ds-help-modal-list">' +
+        '<div>支持在输入框输入 <code>/ds</code> 或 <code>/deepseek</code> 快速召出或控制面板：</div>' +
+        '<div>• <code>/ds</code> 或 <code>/ds toggle</code>：切换显示/隐藏面板</div>' +
+        '<div>• <code>/ds open</code> / <code>/ds close</code>：打开或关闭面板</div>' +
+        '<div>• <code>/ds refresh</code>：刷新统计数据与界面</div>' +
+        '<div>• <code>/ds qr on</code> / <code>/ds qr off</code>：开启或关闭向 QR 栏注入快捷按钮</div>' +
+      '</div></div>' +
+      '<div class="ds-help-block"><div class="ds-help-label-purple">✨ 关于</div><div>本插件由 AI 编写、优化及修复，版本 release1.64</div></div>' +
     '</div>';
 
   panel.appendChild(header);
@@ -2326,11 +2351,29 @@ function bindUIControls(doc) {
   };
   doc.addEventListener('click', _docClickListener);
 
+  // Inject QR checkbox
+  var injectQrChk = doc.getElementById('ds-inject-qr');
+  if (injectQrChk) {
+    injectQrChk.checked = shouldInjectQr();
+    injectQrChk.onchange = async function () {
+      state.settings.injectQr = this.checked;
+      await saveSettings();
+      applyDisplayMode();
+    };
+  }
+
   // Display mode radios
   var radios = doc.querySelectorAll('input[name="ds-display-mode"]');
   radios.forEach(function (radio) {
     if (radio.value === state.settings.displayMode) radio.checked = true;
-    radio.onchange = async function () { state.settings.displayMode = this.value; await saveSettings(); applyDisplayMode(); };
+    radio.onchange = async function () {
+      state.settings.displayMode = this.value;
+      if (state.settings.injectQr === undefined) {
+        if (injectQrChk) injectQrChk.checked = shouldInjectQr();
+      }
+      await saveSettings();
+      applyDisplayMode();
+    };
   });
 
   // Max history items limit select
@@ -3199,6 +3242,14 @@ function togglePanel() {
   }
 }
 
+function openPanel() {
+  if (!state.panelOpen) togglePanel();
+}
+
+function closePanel() {
+  if (state.panelOpen) togglePanel();
+}
+
 // ─── UI Refresh ───────────────────────────────────────────────────────────────
 function refreshUI() {
   if (_refreshPending) return;
@@ -3969,6 +4020,7 @@ export async function init() {
   applyDisplayMode();
   initWalletButtonObserver();
   setTimeout(ensureWalletButton, 1000);
+  registerSlashCommands();
 
   // Viewport sync
   try {
@@ -3998,6 +4050,105 @@ export async function init() {
   } catch (e) {}
 }
 
+// ─── Slash Commands ──────────────────────────────────────────────────────────
+async function registerSlashCommands() {
+  try {
+    var pWin = window.parent || window;
+    var SlashCommandParser, SlashCommand, ARGUMENT_TYPE, SlashCommandArgument, SlashCommandEnumValue;
+
+    try {
+      var scpModule = await import('/scripts/slash-commands/SlashCommandParser.js');
+      SlashCommandParser = scpModule.SlashCommandParser;
+      var scModule = await import('/scripts/slash-commands/SlashCommand.js');
+      SlashCommand = scModule.SlashCommand;
+    } catch (e1) {
+      SlashCommandParser = pWin.SlashCommandParser;
+      SlashCommand = pWin.SlashCommand;
+    }
+
+    if (!SlashCommandParser) {
+      console.warn('[DS] SlashCommandParser not found, skipping slash commands registration');
+      return;
+    }
+
+    try {
+      var scaModule = await import('/scripts/slash-commands/SlashCommandArgument.js');
+      ARGUMENT_TYPE = scaModule.ARGUMENT_TYPE;
+      SlashCommandArgument = scaModule.SlashCommandArgument;
+      var scevModule = await import('/scripts/slash-commands/SlashCommandEnumValue.js');
+      SlashCommandEnumValue = scevModule.SlashCommandEnumValue;
+    } catch (e2) {}
+
+    var unnamedArgs = [];
+    if (SlashCommandArgument && ARGUMENT_TYPE && SlashCommandEnumValue) {
+      unnamedArgs = [
+        SlashCommandArgument.fromProps({
+          description: '操作动作：toggle (切换显示), open (打开), close (关闭), refresh (刷新统计), qr (开关QR注入)',
+          typeList: [ARGUMENT_TYPE.STRING],
+          isRequired: false,
+          enumList: [
+            new SlashCommandEnumValue('toggle', '切换面板显示/隐藏'),
+            new SlashCommandEnumValue('open', '打开统计面板'),
+            new SlashCommandEnumValue('close', '关闭统计面板'),
+            new SlashCommandEnumValue('refresh', '刷新统计数据与界面'),
+            new SlashCommandEnumValue('qr on', '开启注入 QR 栏按钮'),
+            new SlashCommandEnumValue('qr off', '关闭注入 QR 栏按钮'),
+          ],
+          defaultValue: 'toggle',
+        }),
+      ];
+    }
+
+    var cmdCallback = async function (args, value) {
+      var action = (value || '').toString().trim().toLowerCase();
+      if (action === 'open' || action === 'show') {
+        openPanel();
+      } else if (action === 'close' || action === 'hide') {
+        closePanel();
+      } else if (action === 'refresh') {
+        refreshUI();
+      } else if (action === 'qr' || action.startsWith('qr ')) {
+        var sub = action.replace(/^qr\s*/, '').trim();
+        if (sub === 'on' || sub === 'enable' || sub === 'true' || sub === '1') {
+          state.settings.injectQr = true;
+        } else if (sub === 'off' || sub === 'disable' || sub === 'false' || sub === '0') {
+          state.settings.injectQr = false;
+        } else {
+          state.settings.injectQr = !shouldInjectQr();
+        }
+        await saveSettings();
+        applyDisplayMode();
+        var chk = getDoc().getElementById('ds-inject-qr');
+        if (chk) chk.checked = shouldInjectQr();
+        return `DeepSeek QR 栏按钮注入已${shouldInjectQr() ? '开启' : '关闭'}`;
+      } else {
+        togglePanel();
+      }
+      return '';
+    };
+
+    if (SlashCommandParser.commands && SlashCommandParser.commands['ds']) {
+      SlashCommandParser.commands['ds'].callback = cmdCallback;
+      return;
+    }
+
+    if (SlashCommand && typeof SlashCommandParser.addCommandObject === 'function') {
+      SlashCommandParser.addCommandObject(SlashCommand.fromProps({
+        name: 'ds',
+        callback: cmdCallback,
+        aliases: ['deepseek', 'ds-stats', 'ds-toggle'],
+        helpString: '召出或控制 DeepSeek 使用统计面板。用法：/ds [toggle|open|close|refresh|qr on|qr off]',
+        unnamedArgumentList: unnamedArgs,
+      }));
+    } else if (typeof SlashCommandParser.addCommand === 'function') {
+      SlashCommandParser.addCommand('ds', cmdCallback, ['deepseek', 'ds-stats', 'ds-toggle'], '召出或控制 DeepSeek 使用统计面板');
+    }
+    logDebug('已注册 DeepSeek 统计面板斜杠命令: /ds, /deepseek, /ds-stats');
+  } catch (err) {
+    console.warn('[DS] registerSlashCommands error:', err);
+  }
+}
+
 // Global hooks for SillyTavern Extension Loader
 try {
   var pWin = window.parent || window;
@@ -4017,6 +4168,8 @@ if (typeof jQuery !== 'undefined') {
 window.DeepSeekStats = {
   state:        state,
   togglePanel:  togglePanel,
+  openPanel:    openPanel,
+  closePanel:   closePanel,
   refreshUI:    refreshUI,
   getChannels:  getChannels,
   init:         init,
